@@ -63,6 +63,20 @@ GOOGLE_REDIRECT_URI=https://your-domain.com/api/gbp/oauth/callback
 `NODE_ENV` is pinned to `production` by the compose file, so it cannot be
 weakened by a stray value here.
 
+### Serving over plain HTTP
+
+If the site is on `http://` rather than `https://`, also set:
+
+```dotenv
+COOKIE_SECURE=false
+```
+
+The refresh cookie is marked `Secure` in production, and a browser will not
+store or send a Secure cookie over HTTP. Without this you can sign in, then get
+silently signed out when the 15-minute access token expires, and a page refresh
+never restores the session. Turn HTTPS on in Dokploy and remove this line as
+soon as you can — it is the only thing keeping the refresh token off TLS.
+
 ### 3. Add the domain
 
 Domains tab → service **nginx**, container port **80**. Enable HTTPS.

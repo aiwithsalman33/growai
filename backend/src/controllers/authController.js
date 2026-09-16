@@ -28,7 +28,7 @@ const loginSchema = Joi.object({
 function setRefreshCookie(res, refreshToken) {
   res.cookie(REFRESH_COOKIE, refreshToken, {
     httpOnly: true,
-    secure: env.isProduction,
+    secure: env.cookieSecure,
     sameSite: 'lax',
     path: '/api/auth',
     maxAge: 7 * 24 * 60 * 60 * 1000,

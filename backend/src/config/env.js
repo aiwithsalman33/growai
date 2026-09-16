@@ -28,6 +28,15 @@ module.exports = {
   accessTokenTtl: process.env.ACCESS_TOKEN_TTL || '15m',
   refreshTokenTtl: process.env.REFRESH_TOKEN_TTL || '7d',
 
+  // A Secure cookie is only sent over HTTPS, so on a plain-HTTP deployment the
+  // browser silently drops the refresh token and sessions die at the access
+  // token's expiry. Defaults to on in production; set COOKIE_SECURE=false only
+  // when deliberately serving over HTTP.
+  cookieSecure:
+    process.env.COOKIE_SECURE !== undefined
+      ? process.env.COOKIE_SECURE === 'true'
+      : nodeEnv === 'production',
+
   // 32-byte hex key used to encrypt Google OAuth tokens at rest.
   encryptionKey: process.env.ENCRYPTION_KEY,
 
