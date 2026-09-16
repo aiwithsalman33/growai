@@ -15,105 +15,36 @@ import {
   ArrowUpRight
 } from 'lucide-react';
 
-interface UsageRecord {
-  id: string;
-  date: string;
-  reviewer: string;
-  rating: number;
-  model: string;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  cost: number;
-  status: 'published' | 'approved';
-}
-
-const SAMPLE_USAGE_LOGS: UsageRecord[] = [
-  {
-    id: 'log-1',
-    date: '2024-03-15 14:22',
-    reviewer: 'Marcus Vance',
-    rating: 5,
-    model: 'claude-3-5-sonnet',
-    promptTokens: 490,
-    completionTokens: 240,
-    totalTokens: 730,
-    cost: 0.0051,
-    status: 'published',
-  },
-  {
-    id: 'log-2',
-    date: '2024-03-15 11:05',
-    reviewer: 'Elena Rostova',
-    rating: 5,
-    model: 'claude-3-5-sonnet',
-    promptTokens: 512,
-    completionTokens: 215,
-    totalTokens: 727,
-    cost: 0.0048,
-    status: 'published',
-  },
-  {
-    id: 'log-3',
-    date: '2024-03-14 18:40',
-    reviewer: 'David K.',
-    rating: 2,
-    model: 'claude-3-5-sonnet',
-    promptTokens: 620,
-    completionTokens: 310,
-    totalTokens: 930,
-    cost: 0.0065,
-    status: 'published',
-  },
-  {
-    id: 'log-4',
-    date: '2024-03-14 09:12',
-    reviewer: 'Sophia Chen',
-    rating: 4,
-    model: 'claude-3-5-sonnet',
-    promptTokens: 480,
-    completionTokens: 190,
-    totalTokens: 670,
-    cost: 0.0043,
-    status: 'published',
-  },
-  {
-    id: 'log-5',
-    date: '2024-03-13 16:33',
-    reviewer: 'Arthur Pendelton',
-    rating: 5,
-    model: 'claude-3-5-sonnet',
-    promptTokens: 530,
-    completionTokens: 220,
-    totalTokens: 750,
-    cost: 0.0049,
-    status: 'published',
-  },
-];
-
 export const AiUsageCostModule: React.FC = () => {
-  const { activeRole, currentUser, pricingPlans, addToast, navigate } = usePartner();
+  const { activeRole, currentUser, pricingPlans, addToast, navigate, aiUsage } =
+    usePartner();
 
-  const userPlan = pricingPlans.find((p) => p.id === currentUser.planId) || pricingPlans[0];
-  const isSingleUser = activeRole === 'single';
+  const userPlan =
+    pricingPlans.find((p) => p.id === currentUser.planId) || pricingPlans[0];
 
-  // Metrics based on role
-  const repliesUsed = isSingleUser ? 248 : 840;
-  const repliesQuota = userPlan.aiReplyQuota || (isSingleUser ? 250 : 2000);
-  const percentUsed = Math.min(100, Math.round((repliesUsed / repliesQuota) * 100));
+  // Everything below is metered: one AiUsageLog row per generation.
+  const logs = aiUsage?.logs || [];
+  const repliesUsed = aiUsage?.repliesThisMonth ?? 0;
+  // A null quota means the plan carries no cap, not an unknown value.
+  const repliesQuota = aiUsage?.quota ?? userPlan?.aiReplyQuota ?? null;
+  const percentUsed = repliesQuota
+    ? Math.min(100, Math.round((repliesUsed / repliesQuota) * 100))
+    : 0;
 
-  const totalTokens = isSingleUser ? 184250 : 640100;
-  const estimatedCost = isSingleUser ? 1.42 : 4.88;
+  const totalTokens = aiUsage?.tokensThisMonth ?? 0;
+  const estimatedCost = aiUsage?.costThisMonth ?? 0;
 
   const [budgetAlertLimit, setBudgetAlertLimit] = useState(15.0);
   const [budgetAlertModalOpen, setBudgetAlertModalOpen] = useState(false);
 
   const handleExportCsv = () => {
     const headers = 'ID,Date,Reviewer,Rating,Model,PromptTokens,CompletionTokens,TotalTokens,CostUSD,Status\n';
-    const rows = SAMPLE_USAGE_LOGS.map(
-      (r) =>
-        `${r.id},${r.date},"${r.reviewer}",${r.rating},${r.model},${r.promptTokens},${r.completionTokens},${r.totalTokens},${r.cost},${r.status}`
-    ).join('\n');
+    const rows = logs
+      .map(
+        (r) =>
+          `${r.id},${new Date(r.createdAt).toISOString()},"${r.reviewerName || ''}",${r.rating ?? ''},${r.model},${r.promptTokens},${r.completionTokens},${r.totalTokens},${r.costUsd},${r.source}`
+      )
+      .join(String.fromCharCode(10));
     const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -181,7 +112,8 @@ export const AiUsageCostModule: React.FC = () => {
                 You have used {percentUsed}% of your included monthly AI review replies
               </h4>
               <p className="text-xs text-amber-800 mt-0.5">
-                Only {repliesQuota - repliesUsed} replies remaining on the {userPlan.name}. Upgrade your plan to prevent automated replies from pausing.
+                Only {Math.max(0, (repliesQuota ?? 0) - repliesUsed)} replies remaining on the{' '}
+                {userPlan?.name}. Upgrade your plan to prevent automated replies from pausing.
               </p>
             </div>
           </div>
@@ -307,22 +239,41 @@ export const AiUsageCostModule: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-border">
-                {SAMPLE_USAGE_LOGS.map((log) => (
-                  <tr key={log.id} className="hover:bg-surface-muted/50 transition-colors">
-                    <td className="py-2.5 font-mono text-[11px] text-ink-muted">{log.date}</td>
-                    <td className="py-2.5 font-bold text-ink">{log.reviewer}</td>
-                    <td className="py-2.5">
-                      <span className="px-1.5 py-0.5 rounded bg-brand-50 text-brand-700 font-bold text-[10px]">
-                        ★ {log.rating}.0
-                      </span>
+                {logs.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="py-8 text-center text-xs text-ink-muted">
+                      No AI replies generated yet. Usage appears here as soon as you
+                      generate your first reply.
                     </td>
-                    <td className="py-2.5 font-mono text-[11px] text-ink">{log.totalTokens}</td>
+                  </tr>
+                )}
+                {logs.map((log) => (
+                  <tr key={log.id} className="hover:bg-surface-muted/50 transition-colors">
+                    <td className="py-2.5 font-mono text-[11px] text-ink-muted">
+                      {new Date(log.createdAt).toLocaleString()}
+                    </td>
+                    <td className="py-2.5 font-bold text-ink">
+                      {log.reviewerName || '\u2014'}
+                    </td>
+                    <td className="py-2.5">
+                      {log.rating ? (
+                        <span className="px-1.5 py-0.5 rounded bg-brand-50 text-brand-700 font-bold text-[10px]">
+                          {'\u2605'} {log.rating}.0
+                        </span>
+                      ) : (
+                        <span className="text-ink-muted text-[11px]">{'\u2014'}</span>
+                      )}
+                    </td>
+                    <td className="py-2.5 font-mono text-[11px] text-ink">
+                      {log.totalTokens.toLocaleString()}
+                    </td>
                     <td className="py-2.5 font-mono text-[11px] text-brand-700 font-semibold">
-                      ${log.cost.toFixed(4)}
+                      ${log.costUsd.toFixed(4)}
                     </td>
                     <td className="py-2.5">
                       <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Published
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        {log.source === 'auto' ? 'Auto' : 'Manual'}
                       </span>
                     </td>
                   </tr>

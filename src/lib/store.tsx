@@ -27,6 +27,9 @@ import {
 } from '../types';
 import {
   ApiError,
+  AiUsageSummary,
+  TrendPoint,
+  aiUsageApi,
   authApi,
   gbpApi,
   postsApi,
@@ -154,6 +157,15 @@ interface PartnerContextType {
   resetToDefaults: () => void;
   refreshData: () => Promise<void>;
   getKpisForAccount: (accountId: string, period: '7d' | '30d' | '90d') => KpiSummary;
+  /** Trend-chart points for the active account. Synchronous like the KPI
+   *  getter, because the chart reads it during render. */
+  getTrendSeries: (period: '7d' | '30d' | '90d') => {
+    series: TrendPoint[];
+    loading: boolean;
+    engagementAvailable: boolean;
+  };
+  aiUsage: AiUsageSummary | null;
+  refreshAiUsage: () => Promise<void>;
 }
 
 const PartnerContext = createContext<PartnerContextType | null>(null);
@@ -266,6 +278,13 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [kpiCache, setKpiCache] = useState<Record<string, KpiSummary>>({});
   const kpiRequests = useRef<Set<string>>(new Set());
 
+  // Same cache-on-miss shape as the KPI getter.
+  const [trendCache, setTrendCache] = useState<
+    Record<string, { series: TrendPoint[]; engagementAvailable: boolean }>
+  >({});
+  const trendRequests = useRef<Set<string>>(new Set());
+  const [aiUsage, setAiUsage] = useState<AiUsageSummary | null>(null);
+
   // -------------------------------------------------------------------------
   // Toasts
   // -------------------------------------------------------------------------
@@ -329,6 +348,8 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setAllUsers([]);
     setAdminPlatformStats(EMPTY_STATS);
     setKpiCache({});
+    setTrendCache({});
+    setAiUsage(null);
   }, []);
 
   // A refresh failure anywhere in the app lands here.
@@ -955,10 +976,56 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [kpiCache, isAuthenticated]
   );
 
+  const getTrendSeries = useCallback(
+    (period: '7d' | '30d' | '90d') => {
+      const key = `${activeGbpAccountId || 'all'}:${period}`;
+      const cached = trendCache[key];
+
+      if (!cached && isAuthenticated && !trendRequests.current.has(key)) {
+        trendRequests.current.add(key);
+        kpisApi
+          .timeseries(activeGbpAccountId || 'all', period)
+          .then((result) =>
+            setTrendCache((prev) => ({
+              ...prev,
+              [key]: {
+                series: result.series,
+                engagementAvailable: result.engagementAvailable,
+              },
+            }))
+          )
+          .catch(() => undefined)
+          .finally(() => trendRequests.current.delete(key));
+      }
+
+      return {
+        series: cached?.series || [],
+        loading: !cached && isAuthenticated,
+        engagementAvailable: cached?.engagementAvailable ?? false,
+      };
+    },
+    [trendCache, activeGbpAccountId, isAuthenticated]
+  );
+
+  const refreshAiUsage = useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      setAiUsage(await aiUsageApi.summary());
+    } catch {
+      // The panel renders an empty state rather than failing the page.
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    void refreshAiUsage();
+  }, [refreshAiUsage, reviews.length]);
+
   // Metrics are scoped to the account and the data underneath them.
   useEffect(() => {
     setKpiCache({});
     kpiRequests.current.clear();
+    setTrendCache({});
+    trendRequests.current.clear();
   }, [activeGbpAccountId, posts.length, reviews.length]);
 
   // -------------------------------------------------------------------------
@@ -1038,6 +1105,9 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
         resetToDefaults,
         refreshData,
         getKpisForAccount,
+        getTrendSeries,
+        aiUsage,
+        refreshAiUsage,
       }}
     >
       {children}

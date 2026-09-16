@@ -1,6 +1,7 @@
 // src/components/settings/GbpConnectionModule.tsx
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { usePartner } from '../../lib/store';
+import { healthApi } from '../../lib/api';
 import {
   Building2,
   CheckCircle2,
@@ -17,15 +18,29 @@ import {
 } from 'lucide-react';
 
 export const GbpConnectionModule: React.FC = () => {
-  const { activeGbpAccount, disconnectGbpAccount, addToast } = usePartner();
+  const {
+    activeGbpAccount,
+    disconnectGbpAccount,
+    connectGbpAccount,
+    syncReviews,
+    addToast,
+  } = usePartner();
 
-  const [clientId, setClientId] = useState('891048291048-partnerai-gbp.apps.googleusercontent.com');
-  const [clientSecret, setClientSecret] = useState('GOCSPX-9j1K8s91Kx918Ka_mockSecret');
-  const [callbackUrl] = useState('https://app.partnerai.com/api/auth/callback/google');
-  const [showSecret, setShowSecret] = useState(false);
+  // OAuth credentials are server-side only; the browser is told whether they
+  // are configured, never what they are. The callback URL is the one value the
+  // operator needs to paste into Google Cloud Console.
+  const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
+  const callbackUrl = `${window.location.origin}/api/gbp/oauth/callback`;
   const [syncInterval, setSyncInterval] = useState<'realtime' | '15m' | '1h'>('realtime');
   const [isTesting, setIsTesting] = useState(false);
   const [isReverifying, setIsReverifying] = useState(false);
+
+  useEffect(() => {
+    healthApi
+      .check()
+      .then((h) => setGoogleConfigured(h.google === 'configured'))
+      .catch(() => setGoogleConfigured(false));
+  }, []);
 
   const handleCopyCallback = () => {
     navigator.clipboard?.writeText(callbackUrl);
@@ -36,28 +51,42 @@ export const GbpConnectionModule: React.FC = () => {
     });
   };
 
-  const handleTestConnection = () => {
+  const handleTestConnection = async () => {
     setIsTesting(true);
-    setTimeout(() => {
-      setIsTesting(false);
+    const startedAt = performance.now();
+    try {
+      const health = await healthApi.check();
+      const ms = Math.round(performance.now() - startedAt);
+      setGoogleConfigured(health.google === 'configured');
       addToast({
-        type: 'success',
-        title: 'Google Business Profile API Verified',
-        description: 'Ping latency: 42ms • Scope: Google My Business v4.9 Active.',
+        type: health.google === 'configured' ? 'success' : 'warning',
+        title:
+          health.google === 'configured'
+            ? 'Google credentials are configured'
+            : 'Google credentials are not configured',
+        description:
+          health.google === 'configured'
+            ? `API reachable in ${ms}ms.`
+            : 'Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the server.',
       });
-    }, 800);
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'Could not reach the API',
+        description: 'The backend did not respond to the health check.',
+      });
+    } finally {
+      setIsTesting(false);
+    }
   };
 
-  const handleReverifySync = () => {
+  const handleReverifySync = async () => {
     setIsReverifying(true);
-    setTimeout(() => {
+    try {
+      await syncReviews();
+    } finally {
       setIsReverifying(false);
-      addToast({
-        type: 'success',
-        title: 'Location Synced Successfully',
-        description: `Refreshed reviews, photos, and insights for ${activeGbpAccount?.locationName || 'active profile'}.`,
-      });
-    }, 1000);
+    }
   };
 
   return (
@@ -124,7 +153,7 @@ export const GbpConnectionModule: React.FC = () => {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-ink-muted">Google Account ID</span>
-              <span className="font-mono text-[11px] text-ink">{activeGbpAccount?.googleAccountId || 'accounts/10928374910283'}</span>
+              <span className="font-mono text-[11px] text-ink">{activeGbpAccount?.googleAccountId || 'Not connected'}</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-ink-muted">Verification Status</span>
@@ -202,36 +231,32 @@ export const GbpConnectionModule: React.FC = () => {
           </div>
 
           <div className="space-y-3">
-            <div>
-              <label className="block text-xs font-semibold text-ink mb-1">
-                Google Cloud Client ID
-              </label>
-              <input
-                type="text"
-                value={clientId}
-                onChange={(e) => setClientId(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-surface border border-surface-border rounded-xl font-mono text-ink focus:ring-2 focus:ring-brand-500 focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-ink">Client Secret</label>
-                <button
-                  type="button"
-                  onClick={() => setShowSecret(!showSecret)}
-                  className="text-[10px] text-brand-700 hover:text-brand-800 flex items-center gap-1 font-semibold"
-                >
-                  {showSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                  {showSecret ? 'Hide Secret' : 'Reveal Secret'}
-                </button>
+            {/* Credentials live in the server environment. The browser is told
+                whether they are set, never what they are. */}
+            <div className="rounded-xl border border-surface-border bg-surface-muted p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-ink">
+                  Server OAuth credentials
+                </span>
+                {googleConfigured === null ? (
+                  <span className="text-[10px] font-semibold text-ink-muted">
+                    Checking...
+                  </span>
+                ) : googleConfigured ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Configured
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                    <AlertCircle className="w-3 h-3 text-amber-600" /> Not configured
+                  </span>
+                )}
               </div>
-              <input
-                type={showSecret ? 'text' : 'password'}
-                value={clientSecret}
-                onChange={(e) => setClientSecret(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-surface border border-surface-border rounded-xl font-mono text-ink focus:ring-2 focus:ring-brand-500 focus:outline-none"
-              />
+              <p className="text-[11px] text-ink-muted mt-1.5">
+                {googleConfigured
+                  ? 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set on the server.'
+                  : 'Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the server environment, then restart the API.'}
+              </p>
             </div>
 
             <div>

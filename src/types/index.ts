@@ -12,6 +12,10 @@ export interface User {
   avatarUrl?: string;
   createdAt: string;
   companyName?: string;
+  /** Present on the admin list endpoints only. */
+  plan?: PricingPlan;
+  gbpAccountCount?: number;
+  teamMemberCount?: number;
 }
 
 export interface GbpAccount {

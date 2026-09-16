@@ -57,6 +57,7 @@ model User {
   gbpAccounts    GbpAccount[]
   aiReplyConfigs AiReplyConfig[]
   teamMembers    AgencyTeamMember[]
+  aiUsageLogs    AiUsageLog[]
   plan           PricingPlan?       @relation(fields: [planId], references: [id])
 }
 
@@ -215,6 +216,28 @@ model GlobalPlatformSettings {
   apiRateLimitPerMin   Int      @default(120)
   gbpSyncIntervalMinutes Int    @default(60)
   updatedAt            DateTime @updatedAt
+}
+
+/// One row per AI generation. Backs the "AI Usage & Cost" panel, which read
+/// from a hardcoded sample array before this existed.
+model AiUsageLog {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gbpAccountId     String?
+  reviewId         String?
+  reviewerName     String?
+  rating           Int?
+  model            String
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  totalTokens      Int      @default(0)
+  costUsd          Float    @default(0)
+  source           String   @default("manual")
+  createdAt        DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([gbpAccountId])
 }
 
 model AuditLog {

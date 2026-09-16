@@ -12,8 +12,16 @@ import {
   ResponsiveContainer,
   Legend
 } from 'recharts';
-import { MOCK_TIMESERIES, MOCK_TIMESERIES_30D } from '../../lib/mockData';
-import { Calendar, Eye, PhoneCall, Navigation, MousePointerClick } from 'lucide-react';
+import { usePartner } from '../../lib/store';
+import {
+  Calendar,
+  Eye,
+  PhoneCall,
+  Navigation,
+  MousePointerClick,
+  Loader2,
+  Info,
+} from 'lucide-react';
 
 interface TrendChartProps {
   title?: string;
@@ -27,8 +35,28 @@ export const TrendChart: React.FC<TrendChartProps> = ({
   onPeriodChange,
 }) => {
   const [metric, setMetric] = useState<'views' | 'interactions'>('views');
+  const { getTrendSeries } = usePartner();
 
-  const data = period === '7d' ? MOCK_TIMESERIES : MOCK_TIMESERIES_30D;
+  // Real points from /api/kpis/timeseries. `loading` is the first fetch;
+  // `engagementAvailable` is false until a GBP account is actually connected,
+  // which is why the engagement lines can legitimately sit at zero.
+  const { series: data, loading, engagementAvailable } = getTrendSeries(period);
+
+  const hasEngagement = data.some(
+    (d) => d.views || d.searches || d.calls || d.directions || d.clicks
+  );
+
+  // Footer totals are summed from the same series the chart draws — they used
+  // to be four hardcoded numbers with invented trend percentages.
+  const sum = (key: 'views' | 'calls' | 'directions' | 'clicks') =>
+    data.reduce((total, point) => total + (point[key] || 0), 0);
+
+  const totals = [
+    { label: 'Total Impressions', value: sum('views'), Icon: Eye },
+    { label: 'Direct Phone Calls', value: sum('calls'), Icon: PhoneCall },
+    { label: 'Driving Directions', value: sum('directions'), Icon: Navigation },
+    { label: 'Website Visits', value: sum('clicks'), Icon: MousePointerClick },
+  ];
 
   return (
     <div className="bg-surface rounded-2xl border border-surface-border p-6 shadow-xs">
@@ -37,7 +65,11 @@ export const TrendChart: React.FC<TrendChartProps> = ({
         <div>
           <h3 className="text-base font-bold text-ink">{title}</h3>
           <p className="text-xs text-ink-muted mt-0.5">
-            Verified performance metrics synced from Google Business Profile API
+            {loading
+              ? 'Loading performance metrics…'
+              : engagementAvailable
+                ? 'Performance metrics synced from the Google Business Profile API'
+                : 'Review and post activity from your account'}
           </p>
         </div>
 
@@ -90,6 +122,17 @@ export const TrendChart: React.FC<TrendChartProps> = ({
 
       {/* Recharts Canvas */}
       <div className="h-72 w-full">
+        {loading ? (
+          <div className="h-full flex flex-col items-center justify-center gap-2 text-ink-muted">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span className="text-xs">Loading metrics…</span>
+          </div>
+        ) : !data.length ? (
+          <div className="h-full flex flex-col items-center justify-center gap-2 text-ink-muted">
+            <Info className="w-5 h-5" />
+            <span className="text-xs">No activity in this period yet.</span>
+          </div>
+        ) : (
         <ResponsiveContainer width="100%" height="100%">
           {metric === 'views' ? (
             <AreaChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
@@ -174,49 +217,36 @@ export const TrendChart: React.FC<TrendChartProps> = ({
             </BarChart>
           )}
         </ResponsiveContainer>
+        )}
       </div>
+
+      {/* Engagement counters come from Google; say so rather than showing
+          unexplained zeros before a profile is connected. */}
+      {!loading && data.length > 0 && !hasEngagement && !engagementAvailable && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl border border-surface-border bg-surface-muted px-3 py-2 text-[11px] text-ink-muted">
+          <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>
+            Impressions, calls, directions and clicks come from the Google Business
+            Profile API. Connect a location in Settings to populate them.
+          </span>
+        </div>
+      )}
 
       {/* Footer Metrics highlights */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-5 border-t border-surface-border">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">
-            <Eye className="w-4 h-4" />
+        {totals.map(({ label, value, Icon }) => (
+          <div key={label} className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">
+              <Icon className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="text-[11px] text-ink-muted">{label}</p>
+              <p className="text-sm font-bold text-ink">
+                {loading ? '—' : value.toLocaleString()}
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="text-[11px] text-ink-muted">Total Impressions</p>
-            <p className="text-sm font-bold text-ink">4,610 <span className="text-brand-600 text-xs font-medium">(+14%)</span></p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">
-            <PhoneCall className="w-4 h-4" />
-          </div>
-          <div>
-            <p className="text-[11px] text-ink-muted">Direct Phone Calls</p>
-            <p className="text-sm font-bold text-ink">303 <span className="text-brand-600 text-xs font-medium">(+8%)</span></p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">
-            <Navigation className="w-4 h-4" />
-          </div>
-          <div>
-            <p className="text-[11px] text-ink-muted">Driving Directions</p>
-            <p className="text-sm font-bold text-ink">517 <span className="text-brand-600 text-xs font-medium">(+19%)</span></p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">
-            <MousePointerClick className="w-4 h-4" />
-          </div>
-          <div>
-            <p className="text-[11px] text-ink-muted">Website Visits</p>
-            <p className="text-sm font-bold text-ink">448 <span className="text-brand-600 text-xs font-medium">(+11%)</span></p>
-          </div>
-        </div>
+        ))}
       </div>
     </div>
   );

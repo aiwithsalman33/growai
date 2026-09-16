@@ -53,9 +53,29 @@ function buildUserPrompt(review, customTone) {
     .join('\n');
 }
 
+// USD per million tokens, by model. Used to price each generation for the
+// usage panel; unknown models fall back to the default model's rate.
+const PRICING = {
+  'claude-opus-5': { input: 5, output: 25 },
+  'claude-sonnet-5': { input: 2, output: 10 },
+  'claude-haiku-4-5': { input: 1, output: 5 },
+};
+
+function priceFor(model, promptTokens, completionTokens) {
+  const rate = PRICING[model] || PRICING[env.anthropicModel] || PRICING['claude-opus-5'];
+  const cost =
+    (promptTokens / 1_000_000) * rate.input +
+    (completionTokens / 1_000_000) * rate.output;
+  // Sub-cent costs are normal here — keep enough precision to sum them.
+  return Number(cost.toFixed(6));
+}
+
 /**
  * Generates a draft reply. Never sends it — publishing is a separate, explicit
  * call so a human stays in the loop unless auto-reply is switched on.
+ *
+ * Returns `{ text, usage }`; `usage` is reported token counts from the API
+ * response, not an estimate.
  */
 async function generateReply({ review, config = {}, businessName, customTone }) {
   const anthropic = getClient();
@@ -94,7 +114,19 @@ async function generateReply({ review, config = {}, businessName, customTone }) 
     throw err;
   }
 
-  return text;
+  const promptTokens = response.usage?.input_tokens || 0;
+  const completionTokens = response.usage?.output_tokens || 0;
+
+  return {
+    text,
+    usage: {
+      model: response.model,
+      promptTokens,
+      completionTokens,
+      totalTokens: promptTokens + completionTokens,
+      costUsd: priceFor(response.model, promptTokens, completionTokens),
+    },
+  };
 }
 
 /**
@@ -109,4 +141,4 @@ function shouldAutoReply(review, config) {
   return review.rating >= minRating;
 }
 
-module.exports = { generateReply, shouldAutoReply };
+module.exports = { generateReply, shouldAutoReply, priceFor };

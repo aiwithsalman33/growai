@@ -17,17 +17,17 @@ production stack serving through nginx.
 
 | Layer | State | Notes |
 |---|---|---|
-| Frontend (React/Vite) | ✅ Wired to the API | No mock data except the trend chart series |
+| Frontend (React/Vite) | ✅ Wired to the API | No mock data anywhere |
 | API client | ✅ Real `fetch` | Token refresh, 401 recovery, typed responses |
-| Backend | ✅ Runs | 60 routes, entrypoint, services, middleware |
-| Prisma schema | ✅ Migrated | 10 models, first migration applied |
+| Backend | ✅ Runs | 63 routes, entrypoint, services, middleware |
+| Prisma schema | ✅ Migrated | 11 models, 2 migrations applied |
 | Auth | ✅ Real JWT | Access token in memory, refresh in httpOnly cookie |
 | Tenant isolation | ✅ Enforced server-side | Role guard + per-record ownership check |
 | Docker (local) | ✅ Healthy | postgres + backend + frontend |
 | Docker (prod) | ✅ Healthy | + nginx reverse proxy, one-shot migrate |
 | Google GBP | ⚠️ Simulated | Runs without credentials; publishes are logged |
 | Anthropic | ⚠️ Needs a key | `ANTHROPIC_API_KEY` unset → clean 503 |
-| API verification | ✅ Committed | `make verify` — 45 checks in `scripts/` |
+| API verification | ✅ Committed | `make verify` — 56 checks in `scripts/` |
 | Unit tests | ❌ None | `jest`/`supertest` installed but unused |
 
 ---
@@ -113,8 +113,7 @@ partner.ai/
 ├─ src/                        # React frontend
 │  ├─ lib/api/index.ts         #   typed API client — real fetch
 │  ├─ lib/store.tsx            #   PartnerProvider, backed by the API
-│  ├─ lib/mockData.ts          #   ONLY the trend-chart placeholder series
-│  └─ components/
+│  └─ components/              #   no fixture file: every figure comes from the API
 └─ backend/
    ├─ prisma/schema.prisma     # 10 models
    ├─ prisma/migrations/       # 20260916100437_init
@@ -336,22 +335,38 @@ was caught by the test suite.
 
 ---
 
-## 12. Known gaps
+## 12. Mock data removal
 
-1. **Trend chart is still placeholder data.** `src/lib/mockData.ts` holds the only
-   remaining mock. `/api/kpis/summary` returns period totals, not a daily series;
-   drawing real lines needs a timeseries endpoint over the Performance API.
-2. **`churnRate`, `totalTokensMonth`, `googleApiQuotaUsed` report `0`.** Nothing measures
+Every fixture the UI once rendered is gone; each was replaced with a real source
+rather than deleted.
+
+| Was | Now |
+|---|---|
+| `MOCK_TIMESERIES` in `src/lib/mockData.ts` | `GET /api/kpis/timeseries` — real review/post counts per bucket, Google engagement when connected |
+| Four hardcoded chart footer totals with invented trend percentages | Summed from the same series the chart draws |
+| `SAMPLE_USAGE_LOGS` in the AI usage panel | `GET /api/ai-usage`, backed by an `AiUsageLog` row per generation with Anthropic-reported tokens |
+| Role-based fake counters (`248`/`840` replies, `$1.42`/`$4.88`) | Aggregated from those rows; quota comes from the plan |
+| Hardcoded Google client ID + `GOCSPX-…mockSecret` in settings | Server reports configured/not-configured; credentials never reach the browser |
+| Simulated "ping latency: 42ms" and a 1s fake re-sync | Real `/api/health` probe and a real review sync |
+| `accounts/10928374910283` fallback account id | "Not connected" |
+| Admin agency cards: `3 Managed`, `3 Seats`, `Feb 2024`, `$199 / mo`, "Last active: 10 minutes ago" | Real counts, plan price and signup date; the invented last-active line is gone |
+| A 2FA/TOTP input labelled "Mock 6-digit" | Removed — it validated nothing, so it implied a control that did not exist |
+
+`src/lib/mockData.ts` was deleted. `grep -riE "mock|sample_|dummy|fake" src/` returns nothing.
+
+## 13. Known gaps
+
+1. **`churnRate`, `totalTokensMonth`, `googleApiQuotaUsed` report `0`.** Nothing measures
    them. Zeroed rather than invented.
-3. **Insight trend percentages return `0`** — each needs a second Google call per account
+2. **Insight trend percentages return `0`** — each needs a second Google call per account
    per period.
-4. **No unit tests.** The end-to-end checks now live in `scripts/verify-api.mjs` and
+3. **No unit tests.** The end-to-end checks now live in `scripts/verify-api.mjs` and
    `scripts/verify-scheduler.mjs` (`make verify`), but they exercise a running stack.
    Unit-level coverage with `jest` + `supertest` in `backend/tests/` is still missing.
-5. **Scheduler is single-instance.** The overlap guard is in-process, so running two
+4. **Scheduler is single-instance.** The overlap guard is in-process, so running two
    backend replicas could double-publish. A `SELECT ... FOR UPDATE SKIP LOCKED` claim, or
    an intermediate `PUBLISHING` status, would be needed to scale out.
-6. **Review sync is manual** (`POST /api/reviews/sync`). `gbpSyncIntervalMinutes` exists
+5. **Review sync is manual** (`POST /api/reviews/sync`). `gbpSyncIntervalMinutes` exists
    in settings but nothing polls Google on a timer yet.
-7. **Agency team members are records, not logins.** Inviting one stores a row; it does not
+6. **Agency team members are records, not logins.** Inviting one stores a row; it does not
    create a `User` or send an email.

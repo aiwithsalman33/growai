@@ -27,13 +27,17 @@ make seed                     # demo users, plans and locations
 - Health: <http://localhost:4000/api/health>
 - Postgres: `localhost:5432`
 
-Seeded accounts (password `Partner.ai2024`, override with `SEED_PASSWORD`):
+Seeded accounts (demo password `Partner.ai2024`, override with `SEED_PASSWORD`):
 
 | Email | Portal |
 |---|---|
 | `elena@artisanroast.com` | `/login/user` |
 | `marcus@peakscalemedia.com` | `/login/agency` |
 | `alex@partner.ai` | `/login/admin` |
+
+The platform owner is seeded separately from `SUPER_ADMIN_EMAIL` /
+`SUPER_ADMIN_PASSWORD` in `.env` and also signs in at `/login/admin`. Changing
+that password and re-running `make seed` rotates the credential.
 
 Each portal only accepts its own role — signing in at the wrong door is rejected by the
 server, not just the UI.
@@ -131,7 +135,8 @@ POST   /api/posts/:id/{publish,reschedule,duplicate}
 GET    /api/reviews                       POST /api/reviews/sync
 POST   /api/reviews/:id/ai-reply          POST /api/reviews/:id/reply
 GET    /api/photos                        POST /api/photos
-GET    /api/kpis/{summary,comparison}
+GET    /api/kpis/{summary,comparison,timeseries}
+GET    /api/ai-usage                      GET  /api/ai-usage/by-account
 GET    /api/agency/{clients,team}
 GET    /api/admin/{stats,users,agencies,pricing,settings,audit-log}
 POST   /api/admin/users/:id/impersonate
@@ -148,7 +153,8 @@ Role alone never grants access to another tenant's data.
 With the stack running and seeded:
 
 ```bash
-make verify              # 45 API checks: auth, isolation, guards, uploads, limits
+make verify              # 56 API checks: auth, isolation, guards, uploads, limits,
+                         #   trend series, AI usage metering
 make verify-scheduler    # proves a due post publishes (~40s, one poll cycle)
 make verify-prod         # same API suite through the prod nginx proxy
 ```
@@ -171,16 +177,28 @@ be exercised before OAuth is set up. `GET /api/health` reports which mode is act
 
 ---
 
+## No mock data
+
+Every figure in the UI comes from the API. There is no fixture file in the repo.
+
+- The dashboard trend chart reads `/api/kpis/timeseries`. Review and post counts come
+  from our own tables; impressions, calls, directions and clicks come from Google and
+  stay at zero until a location is connected — the chart says so rather than drawing
+  invented lines.
+- The AI usage panel reads `/api/ai-usage`, backed by one `AiUsageLog` row written per
+  generation with the token counts Anthropic reports and a cost derived from them.
+- Admin agency cards show real account counts, seat counts and signup dates.
+- Google OAuth credentials are never sent to the browser; the settings panel reports
+  only whether the server has them configured.
+
 ## Known gaps
 
-- `TrendChart` still draws the placeholder series in `src/lib/mockData.ts` — the KPI
-  endpoint returns period totals, not a daily time series.
 - `adminPlatformStats` reports `churnRate`, `totalTokensMonth` and `googleApiQuotaUsed`
   as `0`; nothing measures them yet. They are zeroed rather than invented.
 - Insight trend percentages (`viewsTrend`, etc.) return `0` — computing them needs a
   second Google call per account per period.
 - No unit tests yet (`jest`/`supertest` are installed). The end-to-end checks in
-  `scripts/` cover the API surface instead — see Verification below.
+  `scripts/` cover the API surface instead — see Verification above.
 
 ## License
 

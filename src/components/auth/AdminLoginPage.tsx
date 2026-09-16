@@ -136,23 +136,7 @@ export const AdminLoginPage: React.FC = () => {
               />
             </div>
 
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs font-semibold text-gray-300">
-                  Hardware 2FA / TOTP Code
-                </label>
-                <span className="text-[10px] text-gray-500 font-mono">Mock 6-digit</span>
-              </div>
-              <input
-                type="text"
-                required
-                value={twoFactorCode}
-                onChange={(e) => setTwoFactorCode(e.target.value)}
-                placeholder="849201"
-                maxLength={6}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-gray-950 border border-gray-800 text-sm text-brand-400 font-mono tracking-widest focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500 transition-all text-center"
-              />
-            </div>
+
 
             <button
               type="submit"

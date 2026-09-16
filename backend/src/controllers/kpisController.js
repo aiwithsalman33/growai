@@ -157,4 +157,106 @@ const comparison = asyncHandler(async (req, res) => {
   res.json({ clients: rows });
 });
 
-module.exports = { summary, comparison };
+/**
+ * Daily (or weekly) points for the dashboard trend chart. Replaces the
+ * hardcoded MOCK_TIMESERIES the chart used to import.
+ *
+ * Review and post counts come from our own tables, so they are always real.
+ * Google-sourced engagement metrics need a connected account; without
+ * credentials they stay at zero rather than being invented.
+ */
+const timeseries = asyncHandler(async (req, res) => {
+  const { gbpAccountId = 'all', period = '7d' } = req.query;
+  const { start, end, days } = rangeFor(period);
+
+  const allowed = await accessibleAccountIds(req.user);
+  let accountIds;
+
+  if (gbpAccountId === 'all') {
+    accountIds = allowed;
+    if (!accountIds) {
+      const all = await prisma.gbpAccount.findMany({ select: { id: true } });
+      accountIds = all.map((a) => a.id);
+    }
+  } else {
+    if (allowed && !allowed.includes(gbpAccountId)) {
+      throw new ApiError(403, 'You do not have access to this GBP account');
+    }
+    accountIds = [gbpAccountId];
+  }
+
+  // 7 days stays daily; longer ranges bucket into weeks so the axis stays legible.
+  const bucketDays = days <= 7 ? 1 : 7;
+  const bucketCount = Math.ceil(days / bucketDays);
+
+  const buckets = Array.from({ length: bucketCount }, (_, i) => {
+    const from = new Date(start.getTime() + i * bucketDays * 86400000);
+    const to = new Date(Math.min(from.getTime() + bucketDays * 86400000, end.getTime()));
+    return {
+      from,
+      to,
+      date:
+        bucketDays === 1
+          ? from.toLocaleDateString('en-US', { weekday: 'short' })
+          : `Wk ${i + 1}`,
+      views: 0,
+      searches: 0,
+      calls: 0,
+      directions: 0,
+      clicks: 0,
+      reviews: 0,
+      posts: 0,
+    };
+  });
+
+  const [reviews, posts] = await Promise.all([
+    prisma.gbpReview.findMany({
+      where: { gbpAccountId: { in: accountIds }, createdAt: { gte: start, lte: end } },
+      select: { createdAt: true },
+    }),
+    prisma.gbpPost.findMany({
+      where: { gbpAccountId: { in: accountIds }, createdAt: { gte: start, lte: end } },
+      select: { createdAt: true },
+    }),
+  ]);
+
+  const bucketFor = (date) => {
+    const index = Math.floor((new Date(date) - start) / (bucketDays * 86400000));
+    return buckets[Math.max(0, Math.min(index, buckets.length - 1))];
+  };
+
+  for (const review of reviews) bucketFor(review.createdAt).reviews += 1;
+  for (const post of posts) bucketFor(post.createdAt).posts += 1;
+
+  // Google engagement metrics, spread across the buckets we already built.
+  const accounts = await prisma.gbpAccount.findMany({
+    where: { id: { in: accountIds }, connected: true },
+  });
+
+  for (const account of accounts) {
+    for (const bucket of buckets) {
+      try {
+        const metrics = await gbpService.fetchInsights(account, {
+          startDate: bucket.from,
+          endDate: bucket.to,
+        });
+        bucket.views += metrics.views || 0;
+        bucket.searches += metrics.searches || 0;
+        bucket.calls += metrics.calls || 0;
+        bucket.directions += metrics.directionRequests || 0;
+        bucket.clicks += metrics.websiteClicks || 0;
+      } catch {
+        // One unreachable location should not blank the chart.
+      }
+    }
+  }
+
+  res.json({
+    series: buckets.map(({ from, to, ...point }) => point),
+    // The UI uses this to explain an all-zero engagement chart instead of
+    // silently showing flat lines.
+    engagementAvailable: accounts.length > 0 && gbpService.isConfigured(),
+  });
+});
+
+module.exports = { summary, comparison, timeseries };

@@ -36,6 +36,7 @@ router.use('/posts', require('./posts'));
 router.use('/reviews', require('./reviews'));
 router.use('/photos', require('./photos'));
 router.use('/kpis', require('./kpis'));
+router.use('/ai-usage', require('./aiUsage'));
 router.use('/agency', require('./agency'));
 router.use('/admin', require('./admin'));
 

@@ -8,5 +8,6 @@ router.use(verifyJwt, requireRole('single', 'agency'));
 
 router.get('/summary', kpis.summary);
 router.get('/comparison', kpis.comparison);
+router.get('/timeseries', kpis.timeseries);
 
 module.exports = router;

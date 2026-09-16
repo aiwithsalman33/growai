@@ -5,6 +5,11 @@
 // Override the target with API_URL=http://localhost/api for the prod stack.
 const BASE = process.env.API_URL || 'http://localhost:4000/api';
 const PW = process.env.SEED_PASSWORD || 'Partner.ai2024';
+// Origin for non-/api paths such as /uploads. Derived from API_URL so the
+// suite works against the dev server and the prod nginx proxy alike.
+const ORIGIN = BASE.replace(/\/api\/?$/, '');
+const OWNER_EMAIL = process.env.SUPER_ADMIN_EMAIL;
+const OWNER_PASSWORD = process.env.SUPER_ADMIN_PASSWORD;
 
 let pass = 0;
 let fail = 0;
@@ -80,6 +85,19 @@ let singleToken, agencyToken, adminToken, singleUser, agencyUser;
   const ad = await login('admin', 'alex@partner.ai');
   adminToken = ad.data?.accessToken;
   check('super_admin logs in at /auth/admin/login', ad.status === 200 && !!adminToken, `status=${ad.status}`);
+
+  // The platform owner seeded from SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD.
+  if (OWNER_EMAIL && OWNER_PASSWORD) {
+    const owner = await login('admin', OWNER_EMAIL, OWNER_PASSWORD);
+    check(`platform owner (${OWNER_EMAIL}) logs in`, owner.status === 200
+      && owner.data?.user?.role === 'super_admin', `status=${owner.status}`);
+
+    const wrongDoor = await login('user', OWNER_EMAIL, OWNER_PASSWORD);
+    check('owner rejected at the tenant portal (403)', wrongDoor.status === 403,
+      `status=${wrongDoor.status}`);
+  } else {
+    console.log('  SKIP  platform owner login (SUPER_ADMIN_EMAIL/PASSWORD not set)');
+  }
 
   const noAuth = await call('/gbp');
   check('protected route without token is 401', noAuth.status === 401, `status=${noAuth.status}`);
@@ -233,7 +251,7 @@ console.log('\n=== 7. Photo upload (local disk, no S3) ===');
   check('stored URL is a relative /uploads path', typeof url === 'string' && url.startsWith('/uploads/'), url);
 
   if (url) {
-    const served = await fetch(`http://localhost:4000${url}`);
+    const served = await fetch(`${ORIGIN}${url}`);
     check('uploaded file is served back', served.status === 200
       && served.headers.get('content-type')?.includes('image'),
       `status=${served.status}`);
@@ -288,7 +306,43 @@ console.log('\n=== 10. Plan limits ===');
     `status=${over.status} ${over.data?.error || ''}`);
 }
 
-console.log('\n=== 11. Audit log ===');
+console.log('\n=== 11. Trend series (replaces the chart mock) ===');
+{
+  const t = await call('/kpis/timeseries?gbpAccountId=all&period=7d', { token: singleToken });
+  check('timeseries returns 7 daily buckets', t.status === 200 && t.data.series.length === 7,
+    `status=${t.status} len=${t.data?.series?.length}`);
+  check('each point carries every metric key', t.status === 200 && t.data.series.every(
+    (p) => ['views', 'searches', 'calls', 'directions', 'clicks', 'reviews', 'posts']
+      .every((k) => typeof p[k] === 'number')));
+  check('engagementAvailable reported honestly', t.status === 200
+    && typeof t.data.engagementAvailable === 'boolean',
+    `value=${t.data?.engagementAvailable}`);
+
+  const weekly = await call('/kpis/timeseries?gbpAccountId=all&period=30d', { token: singleToken });
+  check('30d buckets into weeks', weekly.status === 200 && weekly.data.series.length <= 6
+    && weekly.data.series[0].date.startsWith('Wk'), `len=${weekly.data?.series?.length}`);
+
+  const cross = await call(`/kpis/timeseries?gbpAccountId=${elenaAccountId}`, { token: agencyToken });
+  check('timeseries respects tenant isolation (403)', cross.status === 403, `status=${cross.status}`);
+}
+
+console.log('\n=== 12. AI usage metering (replaces the sample log array) ===');
+{
+  const u = await call('/ai-usage', { token: singleToken });
+  check('ai-usage returns a real summary', u.status === 200 && Array.isArray(u.data.usage.logs),
+    `status=${u.status}`);
+  check('counters start at zero, not sample data', u.status === 200
+    && u.data.usage.repliesThisMonth === 0 && u.data.usage.costThisMonth === 0,
+    `replies=${u.data?.usage?.repliesThisMonth} cost=${u.data?.usage?.costThisMonth}`);
+  check('quota comes from the plan', u.status === 200 && u.data.usage.quota === 100
+    && u.data.usage.planName === 'Single Business',
+    `quota=${u.data?.usage?.quota} plan=${u.data?.usage?.planName}`);
+
+  const byAccount = await call('/ai-usage/by-account', { token: agencyToken });
+  check('ai-usage by-account reachable', byAccount.status === 200, `status=${byAccount.status}`);
+}
+
+console.log('\n=== 13. Audit log ===');
 {
   const log = await call('/admin/audit-log', { token: adminToken });
   check('audit log reachable', log.status === 200, `status=${log.status}`);

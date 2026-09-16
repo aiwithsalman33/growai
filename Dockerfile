@@ -16,6 +16,10 @@ WORKDIR /app/backend
 COPY backend/package.json backend/package-lock.json ./
 RUN npm ci
 
+# Stays root on purpose: `prisma migrate dev` writes new migration files into
+# the bind-mounted prisma/migrations, which a non-root user cannot do through a
+# Windows/macOS bind mount. The entrypoint hands the uploads volume to the
+# runtime UID so the production image (non-root) can share it.
 FROM node:20-alpine AS backend-dev
 RUN apk add --no-cache openssl
 WORKDIR /app/backend
@@ -24,7 +28,7 @@ RUN npm install
 COPY backend/ .
 RUN npx prisma generate
 EXPOSE 4000
-CMD ["npx", "nodemon", "-L", "src/server.js"]
+CMD ["sh", "-c", "mkdir -p /app/backend/uploads && chown -R 1001:1001 /app/backend/uploads || true; exec npx nodemon -L src/server.js"]
 
 FROM node:20-alpine AS backend-build
 RUN apk add --no-cache openssl
@@ -33,13 +37,16 @@ COPY --from=backend-deps /app/backend/node_modules ./node_modules
 COPY backend/ .
 RUN npx prisma generate
 
+# Runs as a non-root, fixed-UID user. The UID must match backend-dev: Docker
+# only applies image ownership when a named volume is first created, so a
+# volume created by one stage must be writable by the other.
 FROM node:20-alpine AS backend-runtime
 RUN apk add --no-cache openssl
+RUN addgroup -g 1001 app && adduser -D -u 1001 -G app app
 WORKDIR /app/backend
 ENV NODE_ENV=production
-RUN addgroup -S app && adduser -S app -G app
 COPY --from=backend-build /app/backend ./
-RUN mkdir -p /app/backend/uploads && chown -R app:app /app/backend/uploads
+RUN mkdir -p /app/backend/uploads && chown -R app:app /app/backend
 USER app
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

@@ -371,27 +371,38 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ initialT
                     </div>
                   </div>
                   <span className="text-xs font-bold text-brand-800 bg-brand-100 px-2.5 py-1 rounded-full">
-                    $199 / mo
+                    {agency.plan ? `$${agency.plan.priceMonthly} / mo` : 'No plan'}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-3 gap-2 text-center text-xs p-2 bg-surface rounded-xl border border-surface-border">
                   <div>
                     <span className="text-ink-muted text-[10px] block">Client Locations</span>
-                    <span className="font-bold text-ink">3 Managed</span>
+                    <span className="font-bold text-ink">
+                      {agency.gbpAccountCount ?? 0} Managed
+                    </span>
                   </div>
                   <div>
                     <span className="text-ink-muted text-[10px] block">Team Members</span>
-                    <span className="font-bold text-ink">3 Seats</span>
+                    <span className="font-bold text-ink">
+                      {agency.teamMemberCount ?? 0} Seats
+                    </span>
                   </div>
                   <div>
                     <span className="text-ink-muted text-[10px] block">Joined</span>
-                    <span className="font-bold text-ink">Feb 2024</span>
+                    <span className="font-bold text-ink">
+                      {new Date(agency.createdAt).toLocaleDateString('en-US', {
+                        month: 'short',
+                        year: 'numeric',
+                      })}
+                    </span>
                   </div>
                 </div>
 
                 <div className="pt-2 flex items-center justify-between">
-                  <span className="text-[11px] text-ink-muted">Last active: 10 minutes ago</span>
+                  <span className="text-[11px] text-ink-muted">
+                    Joined {new Date(agency.createdAt).toLocaleDateString()}
+                  </span>
                   <button
                     type="button"
                     onClick={() => impersonateUser(agency.id)}

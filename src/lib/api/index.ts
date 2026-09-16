@@ -19,6 +19,45 @@ import {
 
 const BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
 
+export interface TrendPoint {
+  date: string;
+  views: number;
+  searches: number;
+  calls: number;
+  directions: number;
+  clicks: number;
+  reviews: number;
+  posts: number;
+}
+
+export interface AiUsageRecord {
+  id: string;
+  createdAt: string;
+  reviewerName: string | null;
+  rating: number | null;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  source: string;
+}
+
+export interface AiUsageSummary {
+  logs: AiUsageRecord[];
+  monthStart: string;
+  repliesThisMonth: number;
+  tokensThisMonth: number;
+  costThisMonth: number;
+  repliesAllTime: number;
+  tokensAllTime: number;
+  costAllTime: number;
+  /** null means the plan carries no cap. */
+  quota: number | null;
+  quotaRemaining: number | null;
+  planName: string | null;
+}
+
 export class ApiError extends Error {
   status: number;
   details?: string[];
@@ -439,6 +478,31 @@ export const kpisApi = {
     });
     return clients;
   },
+
+  /** Points for the dashboard trend chart — real rows, never a fixture. */
+  async timeseries(
+    gbpAccountId: string,
+    period: '7d' | '30d' | '90d'
+  ): Promise<{ series: TrendPoint[]; engagementAvailable: boolean }> {
+    return request<{ series: TrendPoint[]; engagementAvailable: boolean }>(
+      '/kpis/timeseries',
+      { query: { gbpAccountId, period } }
+    );
+  },
+};
+
+export const aiUsageApi = {
+  async summary(limit = 25): Promise<AiUsageSummary> {
+    const { usage } = await request<{ usage: AiUsageSummary }>('/ai-usage', {
+      query: { limit },
+    });
+    return usage;
+  },
+
+  async byAccount() {
+    const { accounts } = await request<{ accounts: any[] }>('/ai-usage/by-account');
+    return accounts;
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -585,6 +649,14 @@ export const adminApi = {
   },
 };
 
+export interface HealthReport {
+  status: string;
+  database: string;
+  /** 'configured' once GOOGLE_CLIENT_ID/SECRET are set on the server. */
+  google: 'configured' | 'not_configured';
+  uptime: number;
+}
+
 export const healthApi = {
-  check: () => request<{ status: string; database: string }>('/health'),
+  check: () => request<HealthReport>('/health'),
 };

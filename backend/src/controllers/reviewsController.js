@@ -96,11 +96,12 @@ async function maybeAutoReply(account, actorId) {
   for (const review of candidates) {
     if (!aiReplyService.shouldAutoReply(review, config)) continue;
     try {
-      const text = await aiReplyService.generateReply({
+      const { text, usage } = await aiReplyService.generateReply({
         review,
         config,
         businessName: account.clientLabel || account.locationName,
       });
+      await recordUsage({ usage, userId: config.userId, account, review, source: 'auto' });
       await sendReply(account, review, text, 'ai');
       await prisma.auditLog.create({
         data: {
@@ -114,6 +115,33 @@ async function maybeAutoReply(account, actorId) {
     } catch {
       // One failed reply must not abort the whole sync.
     }
+  }
+}
+
+/**
+ * One row per generation, so the usage panel reports what was actually spent
+ * instead of a sample array. Never fails the request it belongs to.
+ */
+async function recordUsage({ usage, userId, account, review, source }) {
+  if (!usage || !userId) return;
+  try {
+    await prisma.aiUsageLog.create({
+      data: {
+        userId,
+        gbpAccountId: account?.id || null,
+        reviewId: review?.id || null,
+        reviewerName: review?.reviewerName || null,
+        rating: review?.rating ?? null,
+        model: usage.model,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+        costUsd: usage.costUsd,
+        source,
+      },
+    });
+  } catch {
+    // Metering must never break the reply it is measuring.
   }
 }
 
@@ -138,14 +166,22 @@ const generateAiReply = asyncHandler(async (req, res) => {
     where: { gbpAccountId: req.record.gbpAccountId },
   });
 
-  const text = await aiReplyService.generateReply({
+  const { text, usage } = await aiReplyService.generateReply({
     review: req.record,
     config: config || {},
     businessName: req.gbpAccount.clientLabel || req.gbpAccount.locationName,
     customTone: tone,
   });
 
-  res.json({ reply: text });
+  await recordUsage({
+    usage,
+    userId: req.user.id,
+    account: req.gbpAccount,
+    review: req.record,
+    source: 'manual',
+  });
+
+  res.json({ reply: text, usage });
 });
 
 const reply = asyncHandler(async (req, res) => {

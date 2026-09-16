@@ -35,7 +35,14 @@ services:
         condition: service_healthy
     # -L polls for changes: inotify events do not cross a Windows/macOS
     # bind mount, so without it nodemon never reloads on edit.
-    command: npx nodemon -L src/server.js
+    # The chown hands uploads_data to uid 1001, which the production image runs
+    # as — a named volume keeps the ownership it was created with, so without
+    # this a volume created here is unwritable in prod.
+    command: >
+      sh -c "mkdir -p /app/backend/uploads &&
+      chown -R 1001:1001 /app/backend/uploads || true;
+      exec npx nodemon -L src/server.js"
+
 
   frontend:
     build:

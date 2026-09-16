@@ -9,6 +9,11 @@ const { hashPassword } = require('../src/services/tokenService');
 
 const DEMO_PASSWORD = process.env.SEED_PASSWORD || 'Partner.ai2024';
 
+// The real platform owner, configured in .env rather than hardcoded here.
+const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL;
+const SUPER_ADMIN_PASSWORD = process.env.SUPER_ADMIN_PASSWORD;
+const SUPER_ADMIN_NAME = process.env.SUPER_ADMIN_NAME || 'Super Admin';
+
 const PLANS = [
   {
     name: 'Single Business',
@@ -84,13 +89,15 @@ async function seedPlans() {
   return byName;
 }
 
-async function seedUser({ name, email, role, companyName, planId }) {
-  const passwordHash = await hashPassword(DEMO_PASSWORD);
+async function seedUser({ name, email, role, companyName, planId, password }) {
+  const passwordHash = await hashPassword(password || DEMO_PASSWORD);
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
     return prisma.user.update({
       where: { email },
-      data: { name, role, companyName, planId },
+      // passwordHash included: changing SUPER_ADMIN_PASSWORD in .env and
+      // re-seeding should actually rotate the credential.
+      data: { name, role, companyName, planId, passwordHash },
     });
   }
   return prisma.user.create({
@@ -125,6 +132,23 @@ async function seed() {
     planId: plans['Enterprise / Scale'].id,
   });
 
+  // The platform owner from .env, if configured.
+  let ownerEmail = null;
+  if (SUPER_ADMIN_EMAIL && SUPER_ADMIN_PASSWORD) {
+    if (SUPER_ADMIN_PASSWORD.length < 8) {
+      throw new Error('SUPER_ADMIN_PASSWORD must be at least 8 characters.');
+    }
+    await seedUser({
+      name: SUPER_ADMIN_NAME,
+      email: SUPER_ADMIN_EMAIL.trim().toLowerCase(),
+      role: 'super_admin',
+      companyName: 'Partner.ai',
+      planId: plans['Enterprise / Scale'].id,
+      password: SUPER_ADMIN_PASSWORD,
+    });
+    ownerEmail = SUPER_ADMIN_EMAIL.trim().toLowerCase();
+  }
+
   // One unconnected GBP account each, so the dashboards have something to scope
   // to before anyone completes the Google OAuth flow.
   const locations = [
@@ -149,8 +173,9 @@ async function seed() {
 
   return {
     plans: Object.keys(plans).length,
-    users: 3,
+    users: ownerEmail ? 4 : 3,
     password: DEMO_PASSWORD,
+    ownerEmail,
   };
 }
 
@@ -167,6 +192,11 @@ if (require.main === module) {
       console.log('  elena@artisanroast.com     (single)');
       console.log('  marcus@peakscalemedia.com  (agency)');
       console.log('  alex@partner.ai            (super_admin)');
+      if (result.ownerEmail) {
+        console.log(`  ${result.ownerEmail}  (super_admin, password from SUPER_ADMIN_PASSWORD)`);
+      } else {
+        console.log('  (set SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD in .env to seed the owner account)');
+      }
     })
     .catch((err) => {
       console.error('Seed failed:', err);
