@@ -1,0 +1,37 @@
+{
+  "name": "partner-ai-backend",
+  "version": "0.1.0",
+  "description": "Backend for Partner.ai",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "test": "jest",
+    "prisma": "prisma",
+    "migrate": "npx prisma migrate dev --name init"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.6.0",
+    "@prisma/client": "^5.8.0",
+    "bcrypt": "^5.1.0",
+    "bullmq": "^5.4.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "googleapis": "^133.0.0",
+    "joi": "^17.12.2",
+    "jsonwebtoken": "^9.0.2",
+    "pino": "^9.2.0",
+    "redis": "^4.6.12",
+    "stripe": "^16.0.0",
+    "multer": "^1.4.5-lts.1",
+    "aws-sdk": "^2.1634.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.4",
+    "prisma": "^5.8.0"
+  }
+}

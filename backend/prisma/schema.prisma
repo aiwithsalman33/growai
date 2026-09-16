@@ -1,0 +1,140 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  single
+  agency
+  super_admin
+}
+
+enum PostType {
+  STANDARD
+  EVENT
+  OFFER
+  PRODUCT
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+enum PhotoCategory {
+  LOGO
+  COVER
+  INTERIOR
+  EXTERIOR
+  PRODUCT
+  TEAM
+  IDENTITY
+  AT_WORK
+}
+
+model User {
+  id              String   @id @default(uuid())
+  name            String
+  email           String   @unique
+  passwordHash    String
+  role            Role
+  planId          String?
+  agencyId        String?
+  createdAt       DateTime @default(now())
+  gbpAccounts     GbpAccount[]
+  aiReplyConfigs  AiReplyConfig[]
+}
+
+model GbpAccount {
+  id               String   @id @default(uuid())
+  ownerUserId      String
+  owner            User     @relation(fields: [ownerUserId], references: [id])
+  clientLabel      String?
+  locationName     String
+  googleAccountId  String
+  googleLocationId String
+  accessTokenEnc   String
+  refreshTokenEnc  String
+  tokenExpiresAt   DateTime
+  connected        Boolean  @default(true)
+  connectedAt      DateTime @default(now())
+  posts            GbpPost[]
+  reviews          GbpReview[]
+  photos           GbpPhoto[]
+}
+
+model GbpPost {
+  id            String     @id @default(uuid())
+  gbpAccountId  String
+  gbpAccount    GbpAccount @relation(fields: [gbpAccountId], references: [id])
+  type          PostType
+  imageUrl      String
+  caption       String
+  ctaLabel      String?
+  ctaLink       String?
+  eventStart    DateTime?
+  eventEnd      DateTime?
+  status        PostStatus @default(DRAFT)
+  scheduledAt   DateTime?
+  publishedAt   DateTime?
+  createdAt     DateTime   @default(now())
+}
+
+model GbpReview {
+  id             String     @id @default(uuid())
+  gbpAccountId   String
+  gbpAccount     GbpAccount @relation(fields: [gbpAccountId], references: [id])
+  reviewerName   String
+  reviewerPhoto  String?
+  rating         Int
+  text           String
+  createdAt      DateTime
+  replyText      String?
+  repliedAt      DateTime?
+  replySource    String?
+}
+
+model GbpPhoto {
+  id            String        @id @default(uuid())
+  gbpAccountId  String
+  gbpAccount    GbpAccount    @relation(fields: [gbpAccountId], references: [id])
+  url           String
+  category      PhotoCategory
+  caption       String?
+  uploadedAt    DateTime      @default(now())
+}
+
+model AiReplyConfig {
+  id                  String  @id @default(uuid())
+  gbpAccountId        String  @unique
+  userId              String
+  user                User    @relation(fields: [userId], references: [id])
+  persona             String  @db.Text
+  autoReplyEnabled    Boolean @default(false)
+  autoReplyMinRating  Int     @default(4)
+  signature           String?
+}
+
+model PricingPlan {
+  id              String  @id @default(uuid())
+  name            String
+  priceMonthly    Int
+  maxGbpAccounts  Int
+  isAgencyPlan    Boolean @default(false)
+  features        Json
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  action     String
+  targetType String
+  targetId   String
+  createdAt  DateTime @default(now())
+}
