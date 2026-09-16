@@ -1,6 +1,14 @@
 # Production stack. Self-contained — do not layer with another compose file.
-#   docker compose -f docker-compose.prod.yml up -d --build
-#   docker compose -f docker-compose.prod.yml run --rm migrate
+#
+#   docker compose up -d --build
+#
+# Named docker-compose.yml because that is what deploy platforms (Dokploy,
+# Coolify, Portainer) look for by default. `docker-compose.local.yml` is the
+# development counterpart.
+#
+# The backend applies pending migrations on startup via
+# backend/docker-entrypoint.sh, so a platform that only runs `compose up` still
+# gets a schema. The `migrate` service below stays for running them by hand.
 services:
   postgres:
     image: postgres:16-alpine
@@ -24,6 +32,12 @@ services:
       target: backend-runtime
     restart: always
     env_file: .env
+    environment:
+      # `environment` wins over `env_file`, which in turn overrides the image's
+      # ENV. Without this line a .env carrying NODE_ENV=development would put
+      # the production stack in development mode: the refresh cookie would lose
+      # its Secure flag and the error handler would leak internal messages.
+      NODE_ENV: production
     volumes:
       - uploads_data:/app/backend/uploads
     depends_on:
@@ -41,7 +55,9 @@ services:
       dockerfile: Dockerfile
       target: frontend-runtime
       args:
-        VITE_API_URL: ${VITE_API_URL}
+        # Baked into the bundle at build time. Keep it relative (/api) so the
+        # same image works on any hostname.
+        VITE_API_URL: ${VITE_API_URL:-/api}
     restart: always
     depends_on:
       - backend
@@ -55,7 +71,11 @@ services:
     image: nginx:alpine
     restart: always
     ports:
-      - "80:80"
+      # Host port is configurable because a managed host usually already has
+      # something on :80 (Traefik on Dokploy, for example). Set NGINX_PORT to a
+      # free port there and point the platform's router at it; leave it unset
+      # for a plain Docker host.
+      - "${NGINX_PORT:-80}:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -73,12 +93,14 @@ services:
       dockerfile: Dockerfile
       target: backend-build
     env_file: .env
+    environment:
+      NODE_ENV: production
     working_dir: /app/backend
     depends_on:
       postgres:
         condition: service_healthy
     command: npx prisma migrate deploy
-    profiles: ["tools"] # on demand: docker compose -f docker-compose.prod.yml run --rm migrate
+    profiles: ["tools"] # on demand: docker compose run --rm migrate
 
 volumes:
   postgres_data:

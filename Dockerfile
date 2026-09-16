@@ -57,11 +57,15 @@ COPY --from=backend-build /app/node_modules ./node_modules
 COPY --from=backend-build /app/package.json ./package.json
 COPY --from=backend-build /app/backend ./backend
 RUN mkdir -p /app/backend/uploads && chown -R app:app /app
+# Applies pending migrations before the server starts, so a platform that only
+# runs `compose up` still gets a schema. See backend/docker-entrypoint.sh.
+RUN chmod +x /app/backend/docker-entrypoint.sh
 USER app
 WORKDIR /app/backend
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1:4000/api/health || exit 1
+ENTRYPOINT ["/app/backend/docker-entrypoint.sh"]
 CMD ["node", "src/server.js"]
 
 # ============ FRONTEND ============

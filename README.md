@@ -48,9 +48,16 @@ server, not just the UI.
 ## Production
 
 ```bash
-make prod                     # docker compose -f docker-compose.prod.yml up -d --build
-make prod-migrate             # docker compose -f docker-compose.prod.yml run --rm migrate
+cp .env.example .env          # fill it in, then:
+docker compose up -d --build  # or: make prod
 ```
+
+`docker-compose.yml` is the production stack — the default filename deploy
+platforms look for. The backend applies pending migrations on startup, so no
+separate migration step is needed; `make prod-migrate` still runs them by hand.
+
+Deploying to Dokploy, Coolify or a plain Docker host: see
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 Nginx listens on `:80` and proxies `/api/` and `/uploads/` to the backend, everything
 else to the static SPA.
@@ -106,10 +113,11 @@ partner.ai/
 ├─ node_modules/               # the only install (hoisted)
 ├─ .env / .env.example         # one env file for the whole stack
 ├─ Dockerfile                  # every build stage
+├─ docker-compose.yml          # PROD: built images, restart policies, limits
 ├─ docker-compose.local.yml    # dev: hot reload, bind mounts, exposed DB port
-├─ docker-compose.prod.yml     # prod: built images, restart policies, limits
 ├─ nginx/{nginx.conf,spa.conf} # reverse proxy / SPA fallback
 ├─ Makefile
+├─ DEPLOYMENT.md               # Dokploy / generic Docker deploy guide
 ├─ scripts/                    # verify-api.mjs, verify-scheduler.mjs
 │
 ├─ frontend/                   # React + Vite workspace

@@ -1,0 +1,21 @@
+# Normalize line endings so a Windows checkout cannot ship CRLF to a Linux host.
+* text=auto eol=lf
+
+# These MUST be LF. A CRLF shebang makes the kernel fail the exec with a
+# confusing "no such file or directory" on the interpreter, not on the script.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Makefile text eol=lf
+.env.example text eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary

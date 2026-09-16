@@ -79,8 +79,10 @@ both modes and nothing has to change when switching between them.
 `deps` stage runs a single `npm ci` for the whole workspace; `backend-dev`,
 `backend-build`, `frontend-dev` and `frontend-build` all derive from it, and
 `backend-runtime` / `frontend-runtime` are the slim production images. Compose selects
-one with `target:`. There are exactly two compose files, each self-contained; they are
-never layered.
+one with `target:`. There are exactly two compose files, each self-contained; they are never layered.
+The production one is named `docker-compose.yml` because that is what deploy
+platforms look for by default, and its backend applies pending migrations on
+startup so a bare `compose up` is a complete deploy.
 
 ---
 
@@ -112,8 +114,8 @@ partner.ai/
 ├─ node_modules/               # the only install (hoisted)
 ├─ .env / .env.example         # one env file for the whole stack
 ├─ Dockerfile                  # every build stage
+├─ docker-compose.yml          # PROD — built images, limits, `migrate` profile
 ├─ docker-compose.local.yml    # dev — hot reload, bind mounts, DB port exposed
-├─ docker-compose.prod.yml     # prod — built images, limits, `migrate` profile
 ├─ nginx/nginx.conf            # reverse proxy (prod)
 ├─ nginx/spa.conf              # SPA fallback inside frontend-runtime
 ├─ Makefile
