@@ -17,9 +17,10 @@ Three isolated portals:
 
 ```bash
 cp .env.example .env          # then fill in the secrets
+npm install                   # one shared install at the repo root
 make up                       # or: docker compose -f docker-compose.local.yml up --build
 make migrate                  # create the database schema
-make seed                     # demo users, plans and locations
+make seed                     # demo users, plans, and the owner from .env
 ```
 
 - Frontend: <http://localhost:3000>
@@ -56,7 +57,7 @@ else to the static SPA.
 
 `VITE_API_URL` is `/api` and works unchanged in both modes: nginx proxies it in
 production, and the Vite dev server proxies `/api` and `/uploads` to the backend in
-development (see `vite.config.ts`). It is compiled into the bundle at build time, so
+development (see `frontend/vite.config.ts`). It is compiled into the bundle at build time, so
 change it before `make prod`, not after.
 
 Run `make` targets from the repo root: `make logs`, `make ps`, `make shell-db`,
@@ -71,9 +72,8 @@ Browser → nginx :80 ─┬─ /api/, /uploads/ → backend :4000 → Prisma �
                      └─ /                → frontend :80 (static SPA)
 ```
 
-- **Frontend** — React 19 + TypeScript, Vite 6, Tailwind 4. Lives at the repo root
-  (`src/`, `index.html`, `vite.config.ts`). Built to static files and served by nginx;
-  no Node process in production.
+- **Frontend** — React 19 + TypeScript, Vite 6, Tailwind 4, in the `frontend/`
+  workspace. Built to static files and served by nginx; no Node process in production.
 - **Backend** — Node 20, Express 4, Prisma 5, JWT auth (access token in memory, refresh
   token in an httpOnly cookie), Anthropic for AI review replies, googleapis for GBP.
 - **Database** — PostgreSQL 16 in Docker, on the `postgres_data` volume. **The only
@@ -81,6 +81,8 @@ Browser → nginx :80 ─┬─ /api/, /uploads/ → backend :4000 → Prisma �
 - **Uploads** — local disk on the `uploads_data` volume, served at `/uploads/*`.
   There is no S3 in this stack; `backend/src/services/uploadService.js` is the single
   seam if that ever changes.
+- **Dependencies** — one hoisted `node_modules` at the repo root via npm workspaces.
+  The Docker images install the same way, so container and host trees match.
 - **Scheduling** — a Postgres poll, not a queue. `schedulerService.js` asks every ~30s
   for `GbpPost` rows where `status='SCHEDULED' AND scheduledAt <= now()`, publishes them,
   and counts retries on the row itself.
@@ -93,20 +95,37 @@ There are exactly two compose files and each is self-contained — do not layer 
 
 ## Layout
 
+An npm workspaces monorepo: **one `node_modules` and one `package-lock.json` at
+the repo root**, shared by both workspaces. Neither `frontend/` nor `backend/`
+carries its own install.
+
 ```
 partner.ai/
+├─ package.json                # workspace root — scripts delegate with -w
+├─ package-lock.json           # the only lockfile
+├─ node_modules/               # the only install (hoisted)
+├─ .env / .env.example         # one env file for the whole stack
 ├─ Dockerfile                  # every build stage
 ├─ docker-compose.local.yml    # dev: hot reload, bind mounts, exposed DB port
 ├─ docker-compose.prod.yml     # prod: built images, restart policies, limits
 ├─ nginx/{nginx.conf,spa.conf} # reverse proxy / SPA fallback
 ├─ Makefile
 ├─ scripts/                    # verify-api.mjs, verify-scheduler.mjs
-├─ src/                        # React frontend
-│  ├─ lib/api/index.ts         #   typed API client
-│  ├─ lib/store.tsx            #   PartnerProvider — state, backed by the API
-│  └─ components/              #   auth, user, agency, admin, feature modules
-└─ backend/
-   ├─ prisma/{schema.prisma,seed.js}
+│
+├─ frontend/                   # React + Vite workspace
+│  ├─ package.json
+│  ├─ index.html
+│  ├─ vite.config.ts
+│  ├─ tsconfig.json
+│  └─ src/
+│     ├─ lib/api/index.ts      #   typed API client
+│     ├─ lib/store.tsx         #   PartnerProvider — state, backed by the API
+│     ├─ types/                #   shared TS interfaces
+│     └─ components/           #   auth, user, agency, admin, feature modules
+│
+└─ backend/                    # Express + Prisma workspace
+   ├─ package.json
+   ├─ prisma/{schema.prisma,seed.js,migrations/}
    └─ src/
       ├─ server.js             # entrypoint
       ├─ config/               # env, db, logger
@@ -114,6 +133,15 @@ partner.ai/
       ├─ services/             # token, crypto, upload, gbp, aiReply, scheduler
       ├─ controllers/
       └─ routes/
+```
+
+Run everything from the repo root:
+
+```bash
+npm install              # installs both workspaces into ./node_modules
+npm run build            # builds the frontend workspace
+npm run lint             # typechecks the frontend workspace
+npm run seed             # seeds via the backend workspace
 ```
 
 ---

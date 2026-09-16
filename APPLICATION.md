@@ -42,7 +42,7 @@ Three isolated portals, each with its own login:
 | Agency Partner | `agency` | `/agency/*` | Many client GBP accounts + team |
 | Super Admin | `super_admin` | `/admin/*` | Users, agencies, pricing, global settings |
 
-Isolation is enforced in two places. [App.tsx](src/App.tsx) renders `PortalAccessDenied`
+Isolation is enforced in two places. [App.tsx](frontend/src/App.tsx) renders `PortalAccessDenied`
 for the wrong portal; the server independently rejects a login aimed at the wrong portal
 (403) and every data route runs both a role guard and an ownership check.
 `super_admin` can enter the tenant portals for support — that is deliberate, and
@@ -75,18 +75,20 @@ In local development there is no nginx. Vite serves on `:3000` and proxies `/api
 `/uploads` to the backend (see `vite.config.ts`), so `VITE_API_URL=/api` is correct in
 both modes and nothing has to change when switching between them.
 
-**Build topology.** One `Dockerfile` at the repo root contains every stage —
-`backend-deps`, `backend-dev`, `backend-build`, `backend-runtime`, `frontend-deps`,
-`frontend-dev`, `frontend-build`, `frontend-runtime`. Compose selects one with `target:`.
-There are exactly two compose files, each self-contained; they are never layered.
+**Build topology.** One `Dockerfile` at the repo root contains every stage. A shared
+`deps` stage runs a single `npm ci` for the whole workspace; `backend-dev`,
+`backend-build`, `frontend-dev` and `frontend-build` all derive from it, and
+`backend-runtime` / `frontend-runtime` are the slim production images. Compose selects
+one with `target:`. There are exactly two compose files, each self-contained; they are
+never layered.
 
 ---
 
 ## 4. Tech stack
 
-**Frontend** — React 19, TypeScript, Vite 6, Tailwind 4, recharts, motion, lucide-react.
-Lives at the repo root (`src/`). Built to static files; nginx serves them in production,
-so no Node process runs for the frontend in prod.
+**Frontend** — React 19, TypeScript, Vite 6, Tailwind 4, recharts, motion, lucide-react,
+in the `frontend/` workspace. Built to static files; nginx serves them in production, so
+no Node process runs for the frontend in prod.
 
 **Backend** — Node 20, Express 4 (CommonJS), Prisma 5 → PostgreSQL 16, jsonwebtoken +
 bcrypt, Joi, pino, express-rate-limit, multer, `@anthropic-ai/sdk`, `googleapis`.
@@ -99,8 +101,16 @@ the Google AI Studio `.env.example`.
 
 ## 5. Layout
 
+npm workspaces monorepo. **One `node_modules` and one `package-lock.json`, both at
+the repo root** — neither workspace carries its own install, and the Docker images
+install the same way so container and host trees match.
+
 ```
 partner.ai/
+├─ package.json                # workspace root; scripts delegate with -w
+├─ package-lock.json           # the only lockfile
+├─ node_modules/               # the only install (hoisted)
+├─ .env / .env.example         # one env file for the whole stack
 ├─ Dockerfile                  # every build stage
 ├─ docker-compose.local.yml    # dev — hot reload, bind mounts, DB port exposed
 ├─ docker-compose.prod.yml     # prod — built images, limits, `migrate` profile
@@ -108,22 +118,31 @@ partner.ai/
 ├─ nginx/spa.conf              # SPA fallback inside frontend-runtime
 ├─ Makefile
 ├─ scripts/
-│  ├─ verify-api.mjs           # 45 end-to-end API checks
+│  ├─ verify-api.mjs           # 56 end-to-end API checks
 │  └─ verify-scheduler.mjs     # proves a due post publishes
-├─ src/                        # React frontend
-│  ├─ lib/api/index.ts         #   typed API client — real fetch
-│  ├─ lib/store.tsx            #   PartnerProvider, backed by the API
-│  └─ components/              #   no fixture file: every figure comes from the API
-└─ backend/
-   ├─ prisma/schema.prisma     # 10 models
-   ├─ prisma/migrations/       # 20260916100437_init
-   ├─ prisma/seed.js           # plans, 3 demo users, 3 locations
+│
+├─ frontend/                   # React + Vite workspace
+│  ├─ package.json
+│  ├─ index.html
+│  ├─ vite.config.ts
+│  ├─ tsconfig.json
+│  └─ src/
+│     ├─ lib/api/index.ts      #   typed API client — real fetch
+│     ├─ lib/store.tsx         #   PartnerProvider, backed by the API
+│     ├─ types/                #   shared TS interfaces
+│     └─ components/           #   no fixture file: every figure comes from the API
+│
+└─ backend/                    # Express + Prisma workspace
+   ├─ package.json
+   ├─ prisma/schema.prisma     # 11 models
+   ├─ prisma/migrations/       # init + ai_usage_log
+   ├─ prisma/seed.js           # plans, demo users, owner from .env
    └─ src/
       ├─ server.js
       ├─ config/               # env (fail-fast), db, logger (redacting)
       ├─ middleware/           # auth, roleGuard, ownership, rateLimiter, errorHandler
       ├─ services/             # token, crypto, upload, gbp, aiReply, scheduler
-      ├─ controllers/          # auth, gbp, posts, reviews, photos, kpis, settings, agency, admin
+      ├─ controllers/          # auth, gbp, posts, reviews, photos, kpis, aiUsage, settings, agency, admin
       └─ routes/               # one file per resource, mounted by routes/index.js
 ```
 
@@ -230,7 +249,7 @@ The earlier schema drift is resolved: `address`, `phone`, `website`, `placeId`,
 
 ### 8.1 API client
 
-[src/lib/api/index.ts](src/lib/api/index.ts) holds the access token in a module variable
+[src/lib/api/index.ts](frontend/src/lib/api/index.ts) holds the access token in a module variable
 and sends `credentials: 'include'` so the refresh cookie rides along. On a 401 it calls
 `/auth/refresh` once — single-flight, so parallel 401s don't stampede — and retries. If
 refresh fails it clears the token and fires the store's unauthenticated handler, which
@@ -240,7 +259,7 @@ Nullable columns are normalized at this boundary so the UI's non-optional types 
 
 ### 8.2 Store
 
-[src/lib/store.tsx](src/lib/store.tsx) keeps the same context surface as before, so no
+[src/lib/store.tsx](frontend/src/lib/store.tsx) keeps the same context surface as before, so no
 feature component needed changes. Every mutator now calls the API and folds the response
 into state; failures raise a toast, and the ones that return a value rethrow.
 
@@ -342,7 +361,7 @@ rather than deleted.
 
 | Was | Now |
 |---|---|
-| `MOCK_TIMESERIES` in `src/lib/mockData.ts` | `GET /api/kpis/timeseries` — real review/post counts per bucket, Google engagement when connected |
+| `MOCK_TIMESERIES` in `frontend/src/lib/mockData.ts` | `GET /api/kpis/timeseries` — real review/post counts per bucket, Google engagement when connected |
 | Four hardcoded chart footer totals with invented trend percentages | Summed from the same series the chart draws |
 | `SAMPLE_USAGE_LOGS` in the AI usage panel | `GET /api/ai-usage`, backed by an `AiUsageLog` row per generation with Anthropic-reported tokens |
 | Role-based fake counters (`248`/`840` replies, `$1.42`/`$4.88`) | Aggregated from those rows; quota comes from the plan |
@@ -352,7 +371,7 @@ rather than deleted.
 | Admin agency cards: `3 Managed`, `3 Seats`, `Feb 2024`, `$199 / mo`, "Last active: 10 minutes ago" | Real counts, plan price and signup date; the invented last-active line is gone |
 | A 2FA/TOTP input labelled "Mock 6-digit" | Removed — it validated nothing, so it implied a control that did not exist |
 
-`src/lib/mockData.ts` was deleted. `grep -riE "mock|sample_|dummy|fake" src/` returns nothing.
+`frontend/src/lib/mockData.ts` was deleted. `grep -riE "mock|sample_|dummy|fake" frontend/src/` returns nothing.
 
 ## 13. Known gaps
 

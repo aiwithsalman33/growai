@@ -1,9 +1,9 @@
-# Dependencies
+# Dependencies — one hoisted install at the repo root (npm workspaces)
 node_modules/
 
 # Build output
-build/
 dist/
+build/
 .vite/
 
 # Test / coverage
@@ -15,7 +15,9 @@ coverage/
 
 # Runtime user uploads (these live on the uploads_data Docker volume)
 backend/uploads/
-uploads/
+
+# Prisma generated client
+backend/prisma/generated/
 
 # Logs
 *.log

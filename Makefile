@@ -1,7 +1,7 @@
 LOCAL := docker compose -f docker-compose.local.yml
 PROD  := docker compose -f docker-compose.prod.yml
 
-.PHONY: up down logs ps build migrate migrate-create seed studio prod prod-down prod-migrate prod-logs test verify verify-scheduler verify-prod shell-backend shell-db clean
+.PHONY: install up down logs ps build migrate migrate-create seed studio prod prod-down prod-migrate prod-logs test verify verify-scheduler verify-prod shell-backend shell-frontend shell-db clean
 
 ## --- local dev ---
 up:            ## start the dev stack
@@ -25,11 +25,14 @@ migrate:       ## apply migrations in the running dev backend
 migrate-create: ## create a named migration: make migrate-create NAME=add_x
 	$(LOCAL) exec backend npx prisma migrate dev --name $(NAME)
 
-seed:          ## seed pricing plans + demo users
+seed:          ## seed plans, demo users and the platform owner from .env
 	$(LOCAL) exec backend npm run seed
 
 studio:        ## open Prisma Studio against the dev DB
 	$(LOCAL) exec backend npx prisma studio
+
+install:       ## install every workspace into the shared root node_modules
+	npm install
 
 test:          ## run the backend test suite
 	$(LOCAL) exec backend npm test
@@ -45,6 +48,9 @@ verify-prod:   ## run the API verification suite through the prod nginx proxy
 
 shell-backend: ## shell into the backend container
 	$(LOCAL) exec backend sh
+
+shell-frontend: ## shell into the frontend container
+	$(LOCAL) exec frontend sh
 
 shell-db:      ## psql into the dev database
 	$(LOCAL) exec postgres psql -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-partnerai}

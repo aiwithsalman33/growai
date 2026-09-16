@@ -1,7 +1,10 @@
+# One shared install happens inside the image; never copy host trees in.
 node_modules
+frontend/node_modules
 backend/node_modules
+frontend/dist
 dist
-.next
+backend/uploads
 .git
 .gitignore
 .env
@@ -10,4 +13,3 @@ dist
 npm-debug.log*
 coverage
 *.md
-bun.lock

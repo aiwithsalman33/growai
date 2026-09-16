@@ -1,5 +1,9 @@
 # Local development stack. Self-contained — do not layer with another compose file.
 #   docker compose -f docker-compose.local.yml up --build
+#
+# node_modules is installed once at /app in the image and is deliberately NOT
+# bind-mounted: only each workspace's own directory is mounted, so the shared,
+# hoisted tree from the image stays intact.
 services:
   postgres:
     image: postgres:16-alpine
@@ -24,8 +28,11 @@ services:
       dockerfile: Dockerfile
       target: backend-dev
     env_file: .env
+    working_dir: /app/backend
     volumes:
       - ./backend:/app/backend
+      # Preserves any workspace-local node_modules from the image instead of
+      # letting the bind mount hide it.
       - /app/backend/node_modules
       - uploads_data:/app/backend/uploads
     ports:
@@ -33,8 +40,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # -L polls for changes: inotify events do not cross a Windows/macOS
-    # bind mount, so without it nodemon never reloads on edit.
+    # -L polls for changes: inotify events do not cross a Windows/macOS bind
+    # mount, so without it nodemon never reloads on edit.
     # The chown hands uploads_data to uid 1001, which the production image runs
     # as — a named volume keeps the ownership it was created with, so without
     # this a volume created here is unwritable in prod.
@@ -43,20 +50,20 @@ services:
       chown -R 1001:1001 /app/backend/uploads || true;
       exec npx nodemon -L src/server.js"
 
-
   frontend:
     build:
       context: .
       dockerfile: Dockerfile
       target: frontend-dev
     env_file: .env
+    working_dir: /app/frontend
     environment:
       # Inside the compose network the backend is reachable by service name.
       VITE_PROXY_TARGET: http://backend:4000
       VITE_POLL: "true"
     volumes:
-      - .:/app
-      - /app/node_modules
+      - ./frontend:/app/frontend
+      - /app/frontend/node_modules
     ports:
       - "3000:3000"
     depends_on:
