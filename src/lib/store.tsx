@@ -1,5 +1,17 @@
-// src/lib/store.tsx - Global State and Reactive Data Provider for Partner.ai
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+// src/lib/store.tsx - Global state for Partner.ai.
+//
+// Business data lives in Postgres and reaches this file through `lib/api`.
+// localStorage is used only for non-sensitive UI state (the current path);
+// the session itself is an in-memory access token plus an httpOnly refresh
+// cookie, so closing the tab does not leave credentials on disk.
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+} from 'react';
 import {
   User,
   UserRole,
@@ -11,19 +23,22 @@ import {
   PricingPlan,
   AgencyTeamMember,
   GlobalPlatformSettings,
-  KpiSummary
+  KpiSummary,
 } from '../types';
 import {
-  INITIAL_USERS,
-  INITIAL_GBP_ACCOUNTS,
-  INITIAL_AI_CONFIGS,
-  INITIAL_POSTS,
-  INITIAL_REVIEWS,
-  INITIAL_PHOTOS,
-  INITIAL_PRICING_PLANS,
-  INITIAL_TEAM_MEMBERS,
-  INITIAL_GLOBAL_SETTINGS,
-} from './mockData';
+  ApiError,
+  authApi,
+  gbpApi,
+  postsApi,
+  reviewsApi,
+  photosApi,
+  kpisApi,
+  agencyApi,
+  billingApi,
+  adminApi,
+  setAccessToken,
+  setUnauthenticatedHandler,
+} from './api';
 
 export interface ToastMessage {
   id: string;
@@ -37,10 +52,21 @@ interface PartnerContextType {
   currentUser: User;
   activeRole: UserRole;
   isAuthenticated: boolean;
+  isBooting: boolean;
   setActiveRole: (role: UserRole) => void;
   switchUserRole: (role: UserRole) => void;
-  login: (expectedRole: UserRole, email: string, password?: string) => Promise<{ success: boolean; error?: string }>;
-  signup: (role: 'single' | 'agency', name: string, email: string, companyName: string) => Promise<{ success: boolean; error?: string }>;
+  login: (
+    expectedRole: UserRole,
+    email: string,
+    password?: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  signup: (
+    role: 'single' | 'agency',
+    name: string,
+    email: string,
+    companyName: string,
+    password?: string
+  ) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
 
   // Active GBP account (for Single / Agency client scoping)
@@ -49,6 +75,9 @@ interface PartnerContextType {
   activeGbpAccount: GbpAccount | undefined;
   userGbpAccounts: GbpAccount[];
   allGbpAccounts: GbpAccount[];
+  // Alias for allGbpAccounts. Three settings components already read this name;
+  // it was never on the context before, so it silently resolved to undefined.
+  gbpAccounts: GbpAccount[];
 
   // Navigation / Routing
   currentPath: string;
@@ -63,29 +92,44 @@ interface PartnerContextType {
   reschedulePost: (id: string, newDate: string) => Promise<void>;
 
   reviews: GbpReview[];
-  replyToReview: (id: string, replyText: string, replySource: 'manual' | 'ai') => Promise<void>;
+  replyToReview: (
+    id: string,
+    replyText: string,
+    replySource: 'manual' | 'ai'
+  ) => Promise<void>;
   generateAiReply: (review: GbpReview, customTone?: string) => Promise<string>;
+  syncReviews: () => Promise<void>;
 
   aiConfigs: Record<string, AiReplyConfig>;
   updateAiConfig: (accountId: string, updates: Partial<AiReplyConfig>) => Promise<void>;
 
   photos: GbpPhoto[];
-  uploadPhoto: (photo: Omit<GbpPhoto, 'id' | 'uploadedAt' | 'viewsCount'>) => Promise<GbpPhoto>;
+  uploadPhoto: (
+    photo: Omit<GbpPhoto, 'id' | 'uploadedAt' | 'viewsCount'>,
+    file?: File
+  ) => Promise<GbpPhoto>;
   deletePhoto: (id: string) => Promise<void>;
 
   pricingPlans: PricingPlan[];
   updatePricingPlan: (id: string, updates: Partial<PricingPlan>) => Promise<void>;
 
   teamMembers: AgencyTeamMember[];
-  inviteTeamMember: (name: string, email: string, role: 'admin' | 'manager' | 'contributor') => Promise<void>;
+  inviteTeamMember: (
+    name: string,
+    email: string,
+    role: 'admin' | 'manager' | 'contributor'
+  ) => Promise<void>;
   removeTeamMember: (id: string) => Promise<void>;
 
   globalSettings: GlobalPlatformSettings;
   updateGlobalSettings: (updates: Partial<GlobalPlatformSettings>) => Promise<void>;
 
-  addGbpAccount: (account: Omit<GbpAccount, 'id' | 'connected' | 'connectedAt'>) => Promise<GbpAccount>;
+  addGbpAccount: (
+    account: Omit<GbpAccount, 'id' | 'connected' | 'connectedAt'>
+  ) => Promise<GbpAccount>;
   updateGbpAccount: (id: string, updates: Partial<GbpAccount>) => Promise<void>;
   disconnectGbpAccount: (id: string) => Promise<void>;
+  connectGbpAccount: (id: string) => Promise<void>;
   updateCurrentUser: (updates: Partial<User>) => Promise<void>;
   upgradeUserPlan: (newPlanId: string) => Promise<void>;
   allUsers: User[];
@@ -108,85 +152,126 @@ interface PartnerContextType {
 
   // Utilities
   resetToDefaults: () => void;
+  refreshData: () => Promise<void>;
   getKpisForAccount: (accountId: string, period: '7d' | '30d' | '90d') => KpiSummary;
 }
 
 const PartnerContext = createContext<PartnerContextType | null>(null);
 
-const STORAGE_PREFIX = 'partner_ai_v2_';
+const STORAGE_PREFIX = 'partner_ai_v3_';
+
+/** Keeps `currentUser` non-null before a session is restored. */
+const GUEST_USER: User = {
+  id: '',
+  name: 'Guest',
+  email: '',
+  role: 'single',
+  planId: '',
+  createdAt: new Date().toISOString(),
+};
+
+const DEFAULT_SETTINGS: GlobalPlatformSettings = {
+  defaultLlmProvider: 'anthropic',
+  defaultModel: 'claude-opus-5',
+  maintenanceMode: false,
+  globalAnnouncement: '',
+  systemPromptPreset: '',
+  apiRateLimitPerMin: 120,
+  gbpSyncIntervalMinutes: 60,
+};
+
+const EMPTY_STATS = {
+  mrr: 0,
+  totalUsers: 0,
+  singleUsers: 0,
+  agencyUsers: 0,
+  totalGbpLocations: 0,
+  churnRate: 0,
+  totalTokensMonth: 0,
+  googleApiQuotaUsed: 0,
+};
+
+function zeroKpis(accountId: string): KpiSummary {
+  return {
+    gbpAccountId: accountId,
+    rangeStart: '',
+    rangeEnd: '',
+    views: 0,
+    searches: 0,
+    calls: 0,
+    directionRequests: 0,
+    websiteClicks: 0,
+    avgRating: 0,
+    reviewCount: 0,
+    postCount: 0,
+    viewsTrend: 0,
+    callsTrend: 0,
+    directionsTrend: 0,
+    clicksTrend: 0,
+  };
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    return err.details?.length ? `${err.message}: ${err.details[0]}` : err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return 'Something went wrong. Please try again.';
+}
+
+const LANDING_FOR_ROLE: Record<UserRole, string> = {
+  single: '/user/dashboard',
+  agency: '/agency/dashboard',
+  super_admin: '/admin/dashboard',
+  admin: '/admin/dashboard',
+};
+
+const LOGIN_FOR_ROLE: Record<UserRole, string> = {
+  single: '/login/user',
+  agency: '/login/agency',
+  super_admin: '/login/admin',
+  admin: '/login/admin',
+};
 
 export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Load initial state or localStorage
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}users`);
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
-  });
-
-  const [activeRole, setActiveRoleState] = useState<UserRole>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}role`);
-    return (saved as UserRole) || 'single';
-  });
-
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}auth`);
-    return saved ? JSON.parse(saved) : true;
-  });
+  const [currentUser, setCurrentUser] = useState<User>(GUEST_USER);
+  const [activeRole, setActiveRoleState] = useState<UserRole>('single');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isBooting, setIsBooting] = useState(true);
 
   const [currentPath, setCurrentPath] = useState<string>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}path`);
-    return saved || '/';
+    try {
+      return localStorage.getItem(`${STORAGE_PREFIX}path`) || '/';
+    } catch {
+      return '/';
+    }
   });
 
-  const [gbpAccounts, setGbpAccounts] = useState<GbpAccount[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}accounts`);
-    return saved ? JSON.parse(saved) : INITIAL_GBP_ACCOUNTS;
-  });
-
-  const [activeGbpAccountId, setActiveGbpAccountIdState] = useState<string>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}active_gbp`);
-    return saved || 'gbp-artisan';
-  });
-
-  const [posts, setPosts] = useState<GbpPost[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}posts`);
-    return saved ? JSON.parse(saved) : INITIAL_POSTS;
-  });
-
-  const [reviews, setReviews] = useState<GbpReview[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}reviews`);
-    return saved ? JSON.parse(saved) : INITIAL_REVIEWS;
-  });
-
-  const [aiConfigs, setAiConfigs] = useState<Record<string, AiReplyConfig>>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}ai_configs`);
-    return saved ? JSON.parse(saved) : INITIAL_AI_CONFIGS;
-  });
-
-  const [photos, setPhotos] = useState<GbpPhoto[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}photos`);
-    return saved ? JSON.parse(saved) : INITIAL_PHOTOS;
-  });
-
-  const [pricingPlans, setPricingPlans] = useState<PricingPlan[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}plans`);
-    return saved ? JSON.parse(saved) : INITIAL_PRICING_PLANS;
-  });
-
-  const [teamMembers, setTeamMembers] = useState<AgencyTeamMember[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}team`);
-    return saved ? JSON.parse(saved) : INITIAL_TEAM_MEMBERS;
-  });
-
-  const [globalSettings, setGlobalSettings] = useState<GlobalPlatformSettings>(() => {
-    const saved = localStorage.getItem(`${STORAGE_PREFIX}settings`);
-    return saved ? JSON.parse(saved) : INITIAL_GLOBAL_SETTINGS;
-  });
-
+  const [gbpAccounts, setGbpAccounts] = useState<GbpAccount[]>([]);
+  const [activeGbpAccountId, setActiveGbpAccountIdState] = useState<string>('');
+  const [posts, setPosts] = useState<GbpPost[]>([]);
+  const [reviews, setReviews] = useState<GbpReview[]>([]);
+  const [aiConfigs, setAiConfigs] = useState<Record<string, AiReplyConfig>>({});
+  const [photos, setPhotos] = useState<GbpPhoto[]>([]);
+  const [pricingPlans, setPricingPlans] = useState<PricingPlan[]>([]);
+  const [teamMembers, setTeamMembers] = useState<AgencyTeamMember[]>([]);
+  const [globalSettings, setGlobalSettings] =
+    useState<GlobalPlatformSettings>(DEFAULT_SETTINGS);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [adminPlatformStats, setAdminPlatformStats] = useState(EMPTY_STATS);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Toast dispatchers
+  // KPI cache, keyed `accountId:period`. Lets getKpisForAccount stay
+  // synchronous for the components that call it during render.
+  const [kpiCache, setKpiCache] = useState<Record<string, KpiSummary>>({});
+  const kpiRequests = useRef<Set<string>>(new Set());
+
+  // -------------------------------------------------------------------------
+  // Toasts
+  // -------------------------------------------------------------------------
+
   const addToast = useCallback((toast: Omit<ToastMessage, 'id'>) => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setToasts((prev) => [...prev, { ...toast, id }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -197,623 +282,704 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Save to localStorage
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}users`, JSON.stringify(users));
-  }, [users]);
+  const toastError = useCallback(
+    (title: string, err: unknown) => {
+      addToast({ type: 'error', title, description: errorMessage(err) });
+    },
+    [addToast]
+  );
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}role`, activeRole);
-  }, [activeRole]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}path`, currentPath);
-  }, [currentPath]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}accounts`, JSON.stringify(gbpAccounts));
-  }, [gbpAccounts]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}active_gbp`, activeGbpAccountId);
-  }, [activeGbpAccountId]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}posts`, JSON.stringify(posts));
-  }, [posts]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}reviews`, JSON.stringify(reviews));
-  }, [reviews]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}ai_configs`, JSON.stringify(aiConfigs));
-  }, [aiConfigs]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}photos`, JSON.stringify(photos));
-  }, [photos]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}plans`, JSON.stringify(pricingPlans));
-  }, [pricingPlans]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}team`, JSON.stringify(teamMembers));
-  }, [teamMembers]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}settings`, JSON.stringify(globalSettings));
-  }, [globalSettings]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_PREFIX}auth`, JSON.stringify(isAuthenticated));
-  }, [isAuthenticated]);
-
-  // Derive current user based on activeRole
-  const currentUser = users.find((u) => u.role === activeRole) || users[0];
-
-  // Derive GBP accounts accessible to current user
-  const userGbpAccounts = gbpAccounts.filter((acc) => {
-    if (activeRole === 'super_admin') return true;
-    if (activeRole === 'single') return acc.ownerUserId === 'user-single';
-    if (activeRole === 'agency') return acc.ownerUserId === 'user-agency';
-    return true;
-  });
-
-  // Ensure activeGbpAccountId is valid for current role
-  useEffect(() => {
-    if (activeRole === 'single') {
-      setActiveGbpAccountIdState('gbp-artisan');
-    } else if (activeRole === 'agency') {
-      if (!userGbpAccounts.some((a) => a.id === activeGbpAccountId)) {
-        setActiveGbpAccountIdState(userGbpAccounts[0]?.id || 'gbp-blueharbor');
-      }
-    }
-  }, [activeRole, userGbpAccounts, activeGbpAccountId]);
-
-  const activeGbpAccount = gbpAccounts.find((a) => a.id === activeGbpAccountId) || userGbpAccounts[0];
+  // -------------------------------------------------------------------------
+  // Navigation
+  // -------------------------------------------------------------------------
 
   const navigate = useCallback((path: string) => {
     setCurrentPath(path);
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${STORAGE_PREFIX}path`, currentPath);
+    } catch {
+      // Private browsing — losing the last path is harmless.
+    }
+  }, [currentPath]);
+
+  // -------------------------------------------------------------------------
+  // Session
+  // -------------------------------------------------------------------------
+
+  const applySession = useCallback((user: User) => {
+    setCurrentUser(user);
+    setActiveRoleState(user.role);
+    setIsAuthenticated(true);
+  }, []);
+
+  const clearSession = useCallback(() => {
+    setAccessToken(null);
+    setCurrentUser(GUEST_USER);
+    setIsAuthenticated(false);
+    setGbpAccounts([]);
+    setActiveGbpAccountIdState('');
+    setPosts([]);
+    setReviews([]);
+    setPhotos([]);
+    setAiConfigs({});
+    setTeamMembers([]);
+    setAllUsers([]);
+    setAdminPlatformStats(EMPTY_STATS);
+    setKpiCache({});
+  }, []);
+
+  // A refresh failure anywhere in the app lands here.
+  useEffect(() => {
+    setUnauthenticatedHandler(() => {
+      clearSession();
+      setCurrentPath((path) =>
+        path.startsWith('/user')
+          ? '/login/user'
+          : path.startsWith('/agency')
+            ? '/login/agency'
+            : path.startsWith('/admin')
+              ? '/login/admin'
+              : path
+      );
+    });
+    return () => setUnauthenticatedHandler(null);
+  }, [clearSession]);
+
+  // Restore the session from the refresh cookie on first paint.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const user = await authApi.restore();
+        if (!cancelled && user) applySession(user);
+      } finally {
+        if (!cancelled) setIsBooting(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applySession]);
+
+  // Pricing is public — the marketing and pricing pages need it signed out.
+  useEffect(() => {
+    billingApi
+      .getPlans()
+      .then(setPricingPlans)
+      .catch(() => setPricingPlans([]));
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Data loading
+  // -------------------------------------------------------------------------
+
+  const loadTenantData = useCallback(async () => {
+    const accounts = await gbpApi.getAccounts();
+    setGbpAccounts(accounts);
+    setActiveGbpAccountIdState((current) =>
+      current && accounts.some((a) => a.id === current)
+        ? current
+        : accounts[0]?.id || ''
+    );
+  }, []);
+
+  const loadAdminData = useCallback(async () => {
+    const [users, stats, plans, settings] = await Promise.all([
+      adminApi.listUsers().catch(() => []),
+      adminApi.getPlatformKpis().catch(() => ({})),
+      adminApi.listPlans().catch(() => []),
+      adminApi.getSettings().catch(() => null),
+    ]);
+    setAllUsers(users);
+    setAdminPlatformStats({ ...EMPTY_STATS, ...stats });
+    if (plans.length) setPricingPlans(plans);
+    if (settings) setGlobalSettings({ ...DEFAULT_SETTINGS, ...settings });
+  }, []);
+
+  const refreshData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      if (activeRole === 'super_admin') {
+        await Promise.all([loadAdminData(), loadTenantData()]);
+      } else {
+        await loadTenantData();
+        if (activeRole === 'agency') {
+          setTeamMembers(await agencyApi.listTeam().catch(() => []));
+        }
+      }
+    } catch (err) {
+      toastError('Could not load your data', err);
+    }
+  }, [isAuthenticated, activeRole, loadTenantData, loadAdminData, toastError]);
+
+  useEffect(() => {
+    void refreshData();
+  }, [refreshData]);
+
+  // Per-account collections reload whenever the active client changes.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+
+    (async () => {
+      const scope = activeGbpAccountId || undefined;
+      try {
+        const [nextPosts, nextReviews, nextPhotos] = await Promise.all([
+          postsApi.list(scope),
+          reviewsApi.list(scope),
+          photosApi.list(scope),
+        ]);
+        if (cancelled) return;
+        setPosts(nextPosts);
+        setReviews(nextReviews);
+        setPhotos(nextPhotos);
+      } catch (err) {
+        if (!cancelled) toastError('Could not load profile content', err);
+      }
+
+      if (!scope || cancelled) return;
+      try {
+        const config = await gbpApi.getAiConfig(scope);
+        if (!cancelled) setAiConfigs((prev) => ({ ...prev, [scope]: config }));
+      } catch {
+        // An account with no saved config yet is normal.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, activeGbpAccountId, toastError]);
+
+  // -------------------------------------------------------------------------
+  // Derived
+  // -------------------------------------------------------------------------
+
+  const userGbpAccounts = gbpAccounts.filter(
+    (acc) => activeRole === 'super_admin' || acc.ownerUserId === currentUser.id
+  );
+
+  const activeGbpAccount =
+    gbpAccounts.find((a) => a.id === activeGbpAccountId) || userGbpAccounts[0];
+
+  // -------------------------------------------------------------------------
+  // Auth actions
+  // -------------------------------------------------------------------------
 
   const login = async (
     expectedRole: UserRole,
     email: string,
     password?: string
   ): Promise<{ success: boolean; error?: string }> => {
-    const cleanEmail = email.trim().toLowerCase();
-    const foundUser = users.find((u) => u.email.toLowerCase() === cleanEmail);
-
-    if (!foundUser) {
-      return {
-        success: false,
-        error: `No account found for "${email}". Please verify your email or create an account.`
-      };
+    if (!password) {
+      return { success: false, error: 'Please enter your password.' };
     }
 
-    if (foundUser.role !== expectedRole) {
-      if (foundUser.role === 'single') {
-        return {
-          success: false,
-          error: `This email is registered as a Single Business User. Please sign in via the Single Business Login portal (/login/user).`
-        };
-      } else if (foundUser.role === 'agency') {
-        return {
-          success: false,
-          error: `This email is registered as an Agency Partner. Please sign in via the Agency Login portal (/login/agency).`
-        };
-      } else if (foundUser.role === 'super_admin') {
-        return {
-          success: false,
-          error: `This account has Super Admin credentials. Please access via the Super Admin Operations Portal (/login/admin).`
-        };
-      }
+    try {
+      const user = await authApi.login(expectedRole, email.trim().toLowerCase(), password);
+      applySession(user);
+      setCurrentPath(LANDING_FOR_ROLE[user.role]);
+      addToast({
+        type: 'success',
+        title: `Welcome back, ${user.name}!`,
+        description: `Signed in to the ${
+          user.role === 'single'
+            ? 'Single User'
+            : user.role === 'agency'
+              ? 'Agency'
+              : 'Super Admin'
+        } panel.`,
+      });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: errorMessage(err) };
     }
-
-    // Success
-    setIsAuthenticated(true);
-    setActiveRoleState(foundUser.role);
-
-    if (foundUser.role === 'single') {
-      setActiveGbpAccountIdState('gbp-artisan');
-      setCurrentPath('/user/dashboard');
-    } else if (foundUser.role === 'agency') {
-      setActiveGbpAccountIdState('gbp-blueharbor');
-      setCurrentPath('/agency/dashboard');
-    } else {
-      setCurrentPath('/admin/dashboard');
-    }
-
-    addToast({
-      type: 'success',
-      title: `Welcome back, ${foundUser.name}!`,
-      description: `Logged in to ${foundUser.role === 'single' ? 'Single User Panel' : foundUser.role === 'agency' ? 'Agency Panel' : 'Super Admin Operations'}.`
-    });
-
-    return { success: true };
   };
 
   const signup = async (
     role: 'single' | 'agency',
     name: string,
     email: string,
-    companyName: string
+    companyName: string,
+    password?: string
   ): Promise<{ success: boolean; error?: string }> => {
-    const cleanEmail = email.trim().toLowerCase();
-    if (users.some((u) => u.email.toLowerCase() === cleanEmail)) {
-      return {
-        success: false,
-        error: `An account with ${email} already exists. Please log in.`
-      };
+    if (!password || password.length < 8) {
+      return { success: false, error: 'Please choose a password of at least 8 characters.' };
     }
 
-    const newUser: User = {
-      id: `user-${Date.now()}`,
-      name,
-      email: cleanEmail,
-      role,
-      planId: role === 'single' ? 'plan-single' : 'plan-agency-starter',
-      companyName,
-      createdAt: new Date().toISOString(),
-      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80'
-    };
-
-    setUsers((prev) => [...prev, newUser]);
-    setIsAuthenticated(true);
-    setActiveRoleState(role);
-
-    if (role === 'single') {
-      setCurrentPath('/user/onboarding');
-    } else {
-      setCurrentPath('/agency/onboarding');
+    try {
+      const user = await authApi.signup(role, {
+        name,
+        email: email.trim().toLowerCase(),
+        password,
+        companyName,
+      });
+      applySession(user);
+      setCurrentPath(role === 'single' ? '/user/onboarding' : '/agency/onboarding');
+      addToast({
+        type: 'success',
+        title: 'Account created successfully!',
+        description: "Welcome to Partner.ai. Let's connect your Google Business Profile.",
+      });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: errorMessage(err) };
     }
-
-    addToast({
-      type: 'success',
-      title: 'Account created successfully!',
-      description: `Welcome to Partner.ai. Let's configure your Google Business Profile.`
-    });
-
-    return { success: true };
   };
 
   const logout = () => {
-    setIsAuthenticated(false);
     const prevRole = activeRole;
-    if (prevRole === 'single') {
-      setCurrentPath('/login/user');
-    } else if (prevRole === 'agency') {
-      setCurrentPath('/login/agency');
-    } else if (prevRole === 'super_admin') {
-      setCurrentPath('/login/admin');
-    } else {
-      setCurrentPath('/');
-    }
+    void authApi.logout().catch(() => undefined);
+    clearSession();
+    setCurrentPath(LOGIN_FOR_ROLE[prevRole] || '/');
     addToast({
       type: 'info',
       title: 'Signed out',
-      description: 'You have been safely signed out.'
+      description: 'You have been safely signed out.',
     });
   };
 
-  const switchUserRole = useCallback((newRole: UserRole) => {
-    setActiveRoleState(newRole);
-    setIsAuthenticated(true);
-    if (newRole === 'super_admin') {
-      setCurrentPath('/admin/dashboard');
-      addToast({
-        type: 'info',
-        title: 'Switched to Super Admin panel',
-        description: 'Viewing platform telemetry, direct users, agencies, and pricing plans.'
-      });
-    } else if (newRole === 'agency') {
-      setActiveGbpAccountIdState('gbp-blueharbor');
-      setCurrentPath('/agency/dashboard');
-      addToast({
-        type: 'info',
-        title: 'Switched to Agency panel (Marcus Vance)',
-        description: 'Managing 5 connected client accounts with client switcher.'
-      });
-    } else {
-      setActiveGbpAccountIdState('gbp-artisan');
-      setCurrentPath('/user/dashboard');
-      addToast({
-        type: 'info',
-        title: 'Switched to Single User panel (Elena Rostova)',
-        description: 'Managing 1 connected business: Artisan Roast & Bakery.'
-      });
-    }
-  }, [addToast]);
+  /**
+   * Portal switcher. Roles are now real: only a super admin may walk into
+   * another portal. Anyone else is sent to that portal's login screen rather
+   * than being silently handed a different identity.
+   */
+  const switchUserRole = useCallback(
+    (newRole: UserRole) => {
+      if (currentUser.role === 'super_admin' && isAuthenticated) {
+        setActiveRoleState(newRole);
+        setCurrentPath(LANDING_FOR_ROLE[newRole]);
+        addToast({
+          type: 'info',
+          title: `Viewing the ${newRole.replace('_', ' ')} portal`,
+          description: 'Super admin access — actions are recorded in the audit log.',
+        });
+        return;
+      }
 
-  const setActiveGbpAccountId = useCallback((id: string) => {
-    setActiveGbpAccountIdState(id);
-    const target = gbpAccounts.find((a) => a.id === id);
-    if (target) {
+      setCurrentPath(LOGIN_FOR_ROLE[newRole]);
       addToast({
         type: 'info',
-        title: `Switched location: ${target.clientLabel || target.locationName}`,
-        description: 'Dashboard metrics, posts, and reviews refreshed for this profile.'
+        title: 'Sign in required',
+        description: `Each portal has its own credentials. Sign in to continue.`,
       });
-    }
-  }, [gbpAccounts, addToast]);
+    },
+    [currentUser.role, isAuthenticated, addToast]
+  );
 
-  // Post Actions
+  const setActiveGbpAccountId = useCallback(
+    (id: string) => {
+      setActiveGbpAccountIdState(id);
+      const target = gbpAccounts.find((a) => a.id === id);
+      if (target) {
+        addToast({
+          type: 'info',
+          title: `Switched location: ${target.clientLabel || target.locationName}`,
+          description: 'Dashboard metrics, posts, and reviews refreshed for this profile.',
+        });
+      }
+    },
+    [gbpAccounts, addToast]
+  );
+
+  const impersonateUser = useCallback(
+    (userId: string) => {
+      void (async () => {
+        try {
+          const target = await adminApi.impersonate(userId);
+          applySession(target);
+          setActiveGbpAccountIdState('');
+          setCurrentPath(LANDING_FOR_ROLE[target.role]);
+          addToast({
+            type: 'info',
+            title: `Impersonating ${target.name}`,
+            description: `Acting with ${target.role.toUpperCase()} tenant context.`,
+          });
+        } catch (err) {
+          toastError('Could not impersonate that user', err);
+        }
+      })();
+    },
+    [applySession, addToast, toastError]
+  );
+
+  // -------------------------------------------------------------------------
+  // Posts
+  // -------------------------------------------------------------------------
+
   const createPost = async (newPostData: Omit<GbpPost, 'id'>): Promise<GbpPost> => {
-    const post: GbpPost = {
-      ...newPostData,
-      id: `post-${Date.now()}`,
-      viewsCount: newPostData.status === 'PUBLISHED' ? 12 : 0,
-      clicksCount: 0,
-      publishedAt: newPostData.status === 'PUBLISHED' ? new Date().toISOString() : undefined,
-    };
-    setPosts((prev) => [post, ...prev]);
-    addToast({
-      type: 'success',
-      title: post.status === 'SCHEDULED' ? 'Post scheduled successfully' : 'Post published to Google Profile',
-      description: `Targeting: ${activeGbpAccount?.locationName}`,
-    });
-    return post;
+    try {
+      const post = await postsApi.create({
+        ...newPostData,
+        gbpAccountId: newPostData.gbpAccountId || activeGbpAccountId,
+      });
+      setPosts((prev) => [post, ...prev]);
+      addToast({
+        type: 'success',
+        title:
+          post.status === 'SCHEDULED'
+            ? 'Post scheduled successfully'
+            : post.status === 'PUBLISHED'
+              ? 'Post published to Google Profile'
+              : 'Draft saved',
+        description: `Targeting: ${activeGbpAccount?.locationName || 'your profile'}`,
+      });
+      return post;
+    } catch (err) {
+      toastError('Could not save the post', err);
+      throw err;
+    }
   };
 
   const updatePost = async (id: string, updates: Partial<GbpPost>) => {
-    setPosts((prev) => prev.map((p) => (p.id === id ? { ...p, ...updates } : p)));
-    addToast({
-      type: 'success',
-      title: 'Post updated',
-      description: 'Changes synced to Google Business Profile.',
-    });
+    try {
+      const post = await postsApi.update(id, updates);
+      setPosts((prev) => prev.map((p) => (p.id === id ? post : p)));
+      addToast({ type: 'success', title: 'Post updated' });
+    } catch (err) {
+      toastError('Could not update the post', err);
+    }
   };
 
   const deletePost = async (id: string) => {
-    setPosts((prev) => prev.filter((p) => p.id !== id));
-    addToast({
-      type: 'info',
-      title: 'Post deleted',
-      description: 'The post has been removed.',
-    });
+    try {
+      await postsApi.delete(id);
+      setPosts((prev) => prev.filter((p) => p.id !== id));
+      addToast({ type: 'info', title: 'Post deleted' });
+    } catch (err) {
+      toastError('Could not delete the post', err);
+    }
   };
 
   const duplicatePost = async (id: string) => {
-    const original = posts.find((p) => p.id === id);
-    if (!original) return;
-    const duplicated: GbpPost = {
-      ...original,
-      id: `post-${Date.now()}`,
-      caption: `[Copy] ${original.caption}`,
-      status: 'DRAFT',
-      publishedAt: undefined,
-      scheduledAt: undefined,
-      viewsCount: 0,
-      clicksCount: 0,
-    };
-    setPosts((prev) => [duplicated, ...prev]);
-    addToast({
-      type: 'success',
-      title: 'Post duplicated',
-      description: 'Created a new draft from the selected post.',
-    });
+    try {
+      const post = await postsApi.duplicate(id);
+      setPosts((prev) => [post, ...prev]);
+      addToast({
+        type: 'success',
+        title: 'Post duplicated',
+        description: 'Created a new draft from the selected post.',
+      });
+    } catch (err) {
+      toastError('Could not duplicate the post', err);
+    }
   };
 
   const reschedulePost = async (id: string, newDate: string) => {
-    setPosts((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: 'SCHEDULED', scheduledAt: newDate } : p))
-    );
-    addToast({
-      type: 'success',
-      title: 'Post rescheduled',
-      description: `New schedule: ${new Date(newDate).toLocaleString()}`,
-    });
+    try {
+      const post = await postsApi.reschedule(id, newDate);
+      setPosts((prev) => prev.map((p) => (p.id === id ? post : p)));
+      addToast({
+        type: 'success',
+        title: 'Post rescheduled',
+        description: `New schedule: ${new Date(newDate).toLocaleString()}`,
+      });
+    } catch (err) {
+      toastError('Could not reschedule the post', err);
+    }
   };
 
-  // Review Actions
-  const replyToReview = async (id: string, replyText: string, replySource: 'manual' | 'ai') => {
-    setReviews((prev) =>
-      prev.map((r) =>
-        r.id === id
-          ? {
-              ...r,
-              replyText,
-              replySource,
-              repliedAt: new Date().toISOString(),
-            }
-          : r
-      )
-    );
-    addToast({
-      type: 'success',
-      title: replySource === 'ai' ? 'AI Reply sent to Google' : 'Reply posted to Google',
-      description: 'Review response is now live on Google Maps & Search.',
-    });
+  // -------------------------------------------------------------------------
+  // Reviews
+  // -------------------------------------------------------------------------
+
+  const replyToReview = async (
+    id: string,
+    replyText: string,
+    replySource: 'manual' | 'ai'
+  ) => {
+    try {
+      const review = await reviewsApi.sendReply(id, replyText, replySource);
+      setReviews((prev) => prev.map((r) => (r.id === id ? review : r)));
+      addToast({
+        type: 'success',
+        title: replySource === 'ai' ? 'AI reply sent to Google' : 'Reply posted to Google',
+        description: 'The response is now live on Google Maps & Search.',
+      });
+    } catch (err) {
+      toastError('Could not post the reply', err);
+    }
   };
 
-  // AI Reply Generator with Persona Integration
-  const generateAiReply = async (review: GbpReview, customTone?: string): Promise<string> => {
-    const config = aiConfigs[review.gbpAccountId] || aiConfigs['gbp-artisan'];
-    const businessName = activeGbpAccount?.clientLabel || activeGbpAccount?.locationName || 'Our Business';
-
-    // Simulate realistic AI generation with slight processing delay for authentic feel
-    await new Promise((resolve) => setTimeout(resolve, 800));
-
-    const reviewerName = review.reviewerName.split(' ')[0] || 'valued guest';
-    const isHighRating = review.rating >= 4;
-    const isLowRating = review.rating <= 2;
-
-    let reply = '';
-    if (isHighRating) {
-      if (customTone === 'concise') {
-        reply = `Hi ${reviewerName}, thank you for the ${review.rating}-star review! We loved having you at ${businessName} and look forward to your next visit.`;
-      } else if (customTone === 'luxury') {
-        reply = `Dear ${reviewerName}, it is an absolute honor to receive your generous review. Our culinary and service team remains dedicated to delivering unparalleled experiences every single day. We eagerly anticipate welcoming you back soon.`;
-      } else {
-        reply = `Hello ${reviewerName}! Thank you so much for taking the time to leave us this glowing ${review.rating}-star review. We're thrilled to know you had such a great experience with us at ${businessName}. Looking forward to seeing you again very soon!`;
-      }
-    } else if (isLowRating) {
-      reply = `Hello ${reviewerName}, thank you for your candid feedback. We are deeply sorry that your experience fell short of our standard of excellence. We take this seriously and would love the chance to make things right—please reach out to us directly so we can assist you.`;
-    } else {
-      reply = `Hi ${reviewerName}, thank you for your balanced feedback! We are always striving to improve our guest experience at ${businessName} and truly appreciate your insights. Hope to see you back again soon!`;
+  const generateAiReply = async (
+    review: GbpReview,
+    customTone?: string
+  ): Promise<string> => {
+    try {
+      return await reviewsApi.generateAiReply(review.id, { tone: customTone });
+    } catch (err) {
+      toastError('Could not generate a reply', err);
+      throw err;
     }
+  };
 
-    if (config?.signature) {
-      reply = `${reply} ${config.signature}`;
+  const syncReviews = async () => {
+    if (!activeGbpAccountId) return;
+    try {
+      const result = await reviewsApi.sync(activeGbpAccountId);
+      setReviews(await reviewsApi.list(activeGbpAccountId));
+      addToast({
+        type: 'success',
+        title: 'Reviews synced',
+        description: `${result.created} new, ${result.updated} updated.`,
+      });
+    } catch (err) {
+      toastError('Could not sync reviews', err);
     }
-
-    return reply;
   };
 
   const updateAiConfig = async (accountId: string, updates: Partial<AiReplyConfig>) => {
-    setAiConfigs((prev) => ({
-      ...prev,
-      [accountId]: {
-        ...(prev[accountId] || {
-          gbpAccountId: accountId,
-          persona: 'Friendly, warm, professional brand voice.',
-          autoReplyEnabled: false,
-          autoReplyMinRating: 4,
-          signature: '— The Management Team',
-          llmProvider: 'anthropic',
-          modelName: 'claude-3-5-sonnet',
-        }),
-        ...updates,
-      },
-    }));
-    addToast({
-      type: 'success',
-      title: 'AI Persona & Settings Saved',
-      description: 'New guidelines will shape all future generated replies.',
-    });
+    try {
+      const config = await gbpApi.updateAiConfig(accountId, updates);
+      setAiConfigs((prev) => ({ ...prev, [accountId]: config }));
+      addToast({
+        type: 'success',
+        title: 'AI persona & settings saved',
+        description: 'New guidelines will shape all future generated replies.',
+      });
+    } catch (err) {
+      toastError('Could not save the AI settings', err);
+    }
   };
 
-  // Photo Actions
+  // -------------------------------------------------------------------------
+  // Photos
+  // -------------------------------------------------------------------------
+
   const uploadPhoto = async (
-    photoData: Omit<GbpPhoto, 'id' | 'uploadedAt' | 'viewsCount'>
+    photoData: Omit<GbpPhoto, 'id' | 'uploadedAt' | 'viewsCount'>,
+    file?: File
   ): Promise<GbpPhoto> => {
-    const photo: GbpPhoto = {
-      ...photoData,
-      id: `photo-${Date.now()}`,
-      uploadedAt: new Date().toISOString(),
-      viewsCount: 1,
-      dimensions: photoData.dimensions || '1200 x 800',
-    };
-    setPhotos((prev) => [photo, ...prev]);
-    addToast({
-      type: 'success',
-      title: 'Photo published to Google Business',
-      description: `Category: ${photo.category} • Location: ${activeGbpAccount?.locationName}`,
-    });
-    return photo;
+    try {
+      const form = new FormData();
+      form.append('gbpAccountId', photoData.gbpAccountId || activeGbpAccountId);
+      form.append('category', photoData.category);
+      if (photoData.caption) form.append('caption', photoData.caption);
+      if (file) form.append('file', file);
+
+      const photo = await photosApi.upload(form);
+      setPhotos((prev) => [photo, ...prev]);
+      addToast({
+        type: 'success',
+        title: 'Photo uploaded',
+        description: `Category: ${photo.category} • ${activeGbpAccount?.locationName || ''}`,
+      });
+      return photo;
+    } catch (err) {
+      toastError('Could not upload the photo', err);
+      throw err;
+    }
   };
 
   const deletePhoto = async (id: string) => {
-    setPhotos((prev) => prev.filter((p) => p.id !== id));
-    addToast({
-      type: 'info',
-      title: 'Photo removed',
-      description: 'Image deleted from Google Business Profile.',
-    });
+    try {
+      await photosApi.delete(id);
+      setPhotos((prev) => prev.filter((p) => p.id !== id));
+      addToast({ type: 'info', title: 'Photo removed' });
+    } catch (err) {
+      toastError('Could not delete the photo', err);
+    }
   };
 
-  // Pricing Plan Actions (Super Admin)
+  // -------------------------------------------------------------------------
+  // Plans, team, settings
+  // -------------------------------------------------------------------------
+
   const updatePricingPlan = async (id: string, updates: Partial<PricingPlan>) => {
-    setPricingPlans((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updates, version: (p.version || 1) + 1 } : p))
-    );
-    addToast({
-      type: 'success',
-      title: 'Pricing plan updated',
-      description: 'New pricing and limits are now active platform-wide.',
-    });
+    try {
+      const plan = await adminApi.updatePlan(id, updates);
+      setPricingPlans((prev) => prev.map((p) => (p.id === id ? plan : p)));
+      addToast({
+        type: 'success',
+        title: 'Pricing plan updated',
+        description: 'New pricing and limits are now active platform-wide.',
+      });
+    } catch (err) {
+      toastError('Could not update the plan', err);
+    }
   };
 
-  // Team Actions (Agency)
   const inviteTeamMember = async (
     name: string,
     email: string,
     role: 'admin' | 'manager' | 'contributor'
   ) => {
-    const member: AgencyTeamMember = {
-      id: `team-${Date.now()}`,
-      agencyId: 'user-agency',
-      name,
-      email,
-      role,
-      assignedClientIds: [],
-      invitedAt: new Date().toISOString(),
-      status: 'pending',
-    };
-    setTeamMembers((prev) => [...prev, member]);
-    addToast({
-      type: 'success',
-      title: `Invitation sent to ${email}`,
-      description: `Role assigned: ${role.toUpperCase()}`,
-    });
-  };
-
-  const removeTeamMember = async (id: string) => {
-    setTeamMembers((prev) => prev.filter((m) => m.id !== id));
-    addToast({
-      type: 'info',
-      title: 'Team member removed',
-      description: 'Access revoked from agency client profiles.',
-    });
-  };
-
-  // Global Settings Actions (Super Admin)
-  const updateGlobalSettings = async (updates: Partial<GlobalPlatformSettings>) => {
-    setGlobalSettings((prev) => ({ ...prev, ...updates }));
-    addToast({
-      type: 'success',
-      title: 'Global platform settings saved',
-      description: 'System configurations updated.',
-    });
-  };
-
-  // Account Management
-  const addGbpAccount = async (
-    accountData: Omit<GbpAccount, 'id' | 'connected' | 'connectedAt'>
-  ): Promise<GbpAccount> => {
-    const newAcc: GbpAccount = {
-      ...accountData,
-      id: `gbp-${Date.now()}`,
-      connected: true,
-      connectedAt: new Date().toISOString(),
-      healthScore: 90,
-      rating: 4.8,
-      reviewsCount: 15,
-    };
-    setGbpAccounts((prev) => [...prev, newAcc]);
-    setActiveGbpAccountIdState(newAcc.id);
-    addToast({
-      type: 'success',
-      title: 'Google Business Profile connected!',
-      description: `Successfully authenticated location: ${newAcc.locationName}`,
-    });
-    return newAcc;
-  };
-
-  const updateGbpAccount = async (id: string, updates: Partial<GbpAccount>) => {
-    setGbpAccounts((prev) =>
-      prev.map((acc) => (acc.id === id ? { ...acc, ...updates } : acc))
-    );
-    addToast({
-      type: 'success',
-      title: 'Profile Details Saved',
-      description: 'Google Business Profile details have been updated.',
-    });
-  };
-
-  const disconnectGbpAccount = async (id: string) => {
-    setGbpAccounts((prev) => prev.filter((a) => a.id !== id));
-    addToast({
-      type: 'warning',
-      title: 'Google Account Disconnected',
-      description: 'Access token revoked and location unlinked.',
-    });
-  };
-
-  const updateCurrentUser = async (updates: Partial<User>) => {
-    setUsers((prev) =>
-      prev.map((u) => (u.id === currentUser.id ? { ...u, ...updates } : u))
-    );
-    addToast({
-      type: 'success',
-      title: 'Personal Profile Updated',
-      description: 'Your profile changes have been saved.',
-    });
-  };
-
-  const upgradeUserPlan = async (newPlanId: string) => {
-    setUsers((prev) =>
-      prev.map((u) => (u.id === currentUser.id ? { ...u, planId: newPlanId } : u))
-    );
-    const planName = pricingPlans.find((p) => p.id === newPlanId)?.name || newPlanId;
-    addToast({
-      type: 'success',
-      title: `Upgraded to ${planName}!`,
-      description: 'Your new account quotas and features are immediately active.',
-    });
-  };
-
-  const resetToDefaults = () => {
-    localStorage.clear();
-    setUsers(INITIAL_USERS);
-    setActiveRoleState('single');
-    setGbpAccounts(INITIAL_GBP_ACCOUNTS);
-    setActiveGbpAccountIdState('gbp-artisan');
-    setPosts(INITIAL_POSTS);
-    setReviews(INITIAL_REVIEWS);
-    setAiConfigs(INITIAL_AI_CONFIGS);
-    setPhotos(INITIAL_PHOTOS);
-    setPricingPlans(INITIAL_PRICING_PLANS);
-    setTeamMembers(INITIAL_TEAM_MEMBERS);
-    setGlobalSettings(INITIAL_GLOBAL_SETTINGS);
-    setCurrentPath('/user/dashboard');
-    addToast({
-      type: 'info',
-      title: 'Database Reset',
-      description: 'All mock stores restored to initial demonstration state.',
-    });
-  };
-
-  const getKpisForAccount = (accountId: string, period: '7d' | '30d' | '90d'): KpiSummary => {
-    const mult = period === '7d' ? 1 : period === '30d' ? 3.8 : 9.5;
-    const accountReviews = reviews.filter((r) => accountId === 'all' || r.gbpAccountId === accountId);
-    const accountPosts = posts.filter((p) => accountId === 'all' || p.gbpAccountId === accountId);
-
-    const baseViews = 4610;
-    return {
-      gbpAccountId: accountId,
-      rangeStart: '2024-03-01',
-      rangeEnd: '2024-03-15',
-      views: Math.round(baseViews * mult),
-      searches: Math.round(3420 * mult),
-      calls: Math.round(303 * mult),
-      directionRequests: Math.round(517 * mult),
-      websiteClicks: Math.round(448 * mult),
-      avgRating: 4.8,
-      reviewCount: accountReviews.length * 15,
-      postCount: accountPosts.length,
-      viewsTrend: 14.8,
-      callsTrend: 8.2,
-      directionsTrend: 19.5,
-      clicksTrend: 11.4,
-    };
-  };
-
-  const impersonateUser = (userId: string) => {
-    const target = users.find((u) => u.id === userId);
-    if (target) {
-      setActiveRoleState(target.role);
-      if (target.role === 'agency') {
-        const firstAgencyGbp = gbpAccounts.find((a) => a.ownerUserId === target.id);
-        if (firstAgencyGbp) setActiveGbpAccountIdState(firstAgencyGbp.id);
-        setCurrentPath('/agency/dashboard');
-      } else if (target.role === 'single') {
-        const firstSingleGbp = gbpAccounts.find((a) => a.ownerUserId === target.id);
-        if (firstSingleGbp) setActiveGbpAccountIdState(firstSingleGbp.id);
-        setCurrentPath('/user/dashboard');
-      } else {
-        setCurrentPath('/admin');
-      }
+    try {
+      const member = await agencyApi.inviteMember(name, email, role);
+      setTeamMembers((prev) => [...prev, member]);
       addToast({
-        type: 'info',
-        title: `Impersonating ${target.name}`,
-        description: `Logged in with ${target.role.toUpperCase()} tenant context.`,
+        type: 'success',
+        title: `Invitation sent to ${email}`,
+        description: `Role assigned: ${role.toUpperCase()}`,
       });
+    } catch (err) {
+      toastError('Could not invite that team member', err);
     }
   };
 
-  const adminPlatformStats = {
-    mrr: 48950,
-    totalUsers: users.length * 280,
-    singleUsers: 720,
-    agencyUsers: 142,
-    totalGbpLocations: gbpAccounts.length * 340,
-    churnRate: 1.8,
-    totalTokensMonth: 42800000,
-    googleApiQuotaUsed: 38,
+  const removeTeamMember = async (id: string) => {
+    try {
+      await agencyApi.removeMember(id);
+      setTeamMembers((prev) => prev.filter((m) => m.id !== id));
+      addToast({
+        type: 'info',
+        title: 'Team member removed',
+        description: 'Access revoked from agency client profiles.',
+      });
+    } catch (err) {
+      toastError('Could not remove that team member', err);
+    }
   };
+
+  const updateGlobalSettings = async (updates: Partial<GlobalPlatformSettings>) => {
+    try {
+      const settings = await adminApi.updateSettings(updates);
+      setGlobalSettings({ ...DEFAULT_SETTINGS, ...settings });
+      addToast({ type: 'success', title: 'Global platform settings saved' });
+    } catch (err) {
+      toastError('Could not save the settings', err);
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // GBP accounts
+  // -------------------------------------------------------------------------
+
+  const addGbpAccount = async (
+    accountData: Omit<GbpAccount, 'id' | 'connected' | 'connectedAt'>
+  ): Promise<GbpAccount> => {
+    try {
+      const account = await gbpApi.create(accountData);
+      setGbpAccounts((prev) => [...prev, account]);
+      setActiveGbpAccountIdState(account.id);
+      addToast({
+        type: 'success',
+        title: 'Location added',
+        description: `Connect ${account.locationName} to Google to start syncing.`,
+      });
+      return account;
+    } catch (err) {
+      toastError('Could not add that location', err);
+      throw err;
+    }
+  };
+
+  /** Hands the browser to Google's consent screen. */
+  const connectGbpAccount = async (id: string) => {
+    try {
+      const url = await gbpApi.startOAuth(id);
+      window.location.href = url;
+    } catch (err) {
+      toastError('Could not start Google authorization', err);
+    }
+  };
+
+  const updateGbpAccount = async (id: string, updates: Partial<GbpAccount>) => {
+    try {
+      const account = await gbpApi.update(id, updates);
+      setGbpAccounts((prev) => prev.map((a) => (a.id === id ? account : a)));
+      addToast({
+        type: 'success',
+        title: 'Profile details saved',
+        description: 'Google Business Profile details have been updated.',
+      });
+    } catch (err) {
+      toastError('Could not save the profile', err);
+    }
+  };
+
+  const disconnectGbpAccount = async (id: string) => {
+    try {
+      const account = await gbpApi.disconnect(id);
+      setGbpAccounts((prev) => prev.map((a) => (a.id === id ? account : a)));
+      addToast({
+        type: 'warning',
+        title: 'Google account disconnected',
+        description: 'Stored tokens were deleted and the location unlinked.',
+      });
+    } catch (err) {
+      toastError('Could not disconnect that account', err);
+    }
+  };
+
+  const updateCurrentUser = async (updates: Partial<User>) => {
+    try {
+      const user = await authApi.updateProfile(updates);
+      setCurrentUser(user);
+      addToast({ type: 'success', title: 'Personal profile updated' });
+    } catch (err) {
+      toastError('Could not update your profile', err);
+    }
+  };
+
+  const upgradeUserPlan = async (newPlanId: string) => {
+    try {
+      const user = await billingApi.updateSubscription(newPlanId);
+      setCurrentUser(user);
+      const planName = pricingPlans.find((p) => p.id === newPlanId)?.name || newPlanId;
+      addToast({
+        type: 'success',
+        title: `Switched to ${planName}`,
+        description: 'Your new account quotas and features are active immediately.',
+      });
+    } catch (err) {
+      toastError('Could not change your plan', err);
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // KPIs — synchronous read, asynchronous fill
+  // -------------------------------------------------------------------------
+
+  const getKpisForAccount = useCallback(
+    (accountId: string, period: '7d' | '30d' | '90d'): KpiSummary => {
+      const key = `${accountId || 'all'}:${period}`;
+      const cached = kpiCache[key];
+      if (cached) return cached;
+
+      if (isAuthenticated && !kpiRequests.current.has(key)) {
+        kpiRequests.current.add(key);
+        kpisApi
+          .summary(accountId || 'all', period)
+          .then((kpis) => setKpiCache((prev) => ({ ...prev, [key]: kpis })))
+          .catch(() => undefined)
+          .finally(() => kpiRequests.current.delete(key));
+      }
+
+      // Zeros until the real numbers land — never invented figures.
+      return zeroKpis(accountId);
+    },
+    [kpiCache, isAuthenticated]
+  );
+
+  // Metrics are scoped to the account and the data underneath them.
+  useEffect(() => {
+    setKpiCache({});
+    kpiRequests.current.clear();
+  }, [activeGbpAccountId, posts.length, reviews.length]);
+
+  // -------------------------------------------------------------------------
+  // Dev utility
+  // -------------------------------------------------------------------------
+
+  const resetToDefaults = useCallback(() => {
+    void (async () => {
+      try {
+        await adminApi.reseed();
+        await refreshData();
+        addToast({
+          type: 'info',
+          title: 'Demo data restored',
+          description: 'Seed users, plans and locations were re-created.',
+        });
+      } catch (err) {
+        toastError('Could not reset the demo data', err);
+      }
+    })();
+  }, [refreshData, addToast, toastError]);
 
   return (
     <PartnerContext.Provider
@@ -821,6 +987,7 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
         currentUser,
         activeRole,
         isAuthenticated,
+        isBooting,
         setActiveRole: setActiveRoleState,
         switchUserRole,
         login,
@@ -831,6 +998,7 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
         activeGbpAccount,
         userGbpAccounts,
         allGbpAccounts: gbpAccounts,
+        gbpAccounts,
         currentPath,
         navigate,
         posts,
@@ -842,6 +1010,7 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
         reviews,
         replyToReview,
         generateAiReply,
+        syncReviews,
         aiConfigs,
         updateAiConfig,
         photos,
@@ -857,15 +1026,17 @@ export const PartnerProvider: React.FC<{ children: React.ReactNode }> = ({ child
         addGbpAccount,
         updateGbpAccount,
         disconnectGbpAccount,
+        connectGbpAccount,
         updateCurrentUser,
         upgradeUserPlan,
-        allUsers: users,
+        allUsers,
         adminPlatformStats,
         impersonateUser,
         toasts,
         addToast,
         removeToast,
         resetToDefaults,
+        refreshData,
         getKpisForAccount,
       }}
     >

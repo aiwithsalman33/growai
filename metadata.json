@@ -1,6 +1,0 @@
-{
-  "name": "Partner.ai",
-  "description": "Micro-SaaS platform to manage Google Business Profiles with AI-assisted replies, post scheduling, multi-client agency dashboards, and super admin controls.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

@@ -8,6 +8,7 @@ export const AgencySignupPage: React.FC = () => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [agencyName, setAgencyName] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -16,7 +17,7 @@ export const AgencySignupPage: React.FC = () => {
     setError(null);
     setLoading(true);
 
-    const res = await signup('agency', name, email, agencyName);
+    const res = await signup('agency', name, email, agencyName, password);
     setLoading(false);
 
     if (res && !res.success && res.error) {
@@ -101,6 +102,21 @@ export const AgencySignupPage: React.FC = () => {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="marcus@peakscalemedia.com"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-surface-border text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-all text-ink"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-ink mb-1">
+                Password
+              </label>
+              <input
+                type="password"
+                required
+                minLength={8}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 8 characters"
                 className="w-full px-3.5 py-2.5 rounded-xl border border-surface-border text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-all text-ink"
               />
             </div>

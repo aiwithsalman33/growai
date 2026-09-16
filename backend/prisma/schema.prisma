@@ -5,6 +5,9 @@ datasource db {
 
 generator client {
   provider = "prisma-client-js"
+  // node:20-alpine ships OpenSSL 3; without this Prisma probes for
+  // libssl.so.1.1 and fails to load its query engine.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 enum Role {
@@ -39,95 +42,179 @@ enum PhotoCategory {
 }
 
 model User {
-  id              String   @id @default(uuid())
-  name            String
-  email           String   @unique
-  passwordHash    String
-  role            Role
-  planId          String?
-  agencyId        String?
-  createdAt       DateTime @default(now())
-  gbpAccounts     GbpAccount[]
-  aiReplyConfigs  AiReplyConfig[]
+  id             String   @id @default(uuid())
+  name           String
+  email          String   @unique
+  passwordHash   String
+  role           Role
+  planId         String?
+  agencyId       String?
+  phone          String?
+  companyName    String?
+  avatarUrl      String?
+  createdAt      DateTime @default(now())
+
+  gbpAccounts    GbpAccount[]
+  aiReplyConfigs AiReplyConfig[]
+  teamMembers    AgencyTeamMember[]
+  plan           PricingPlan?       @relation(fields: [planId], references: [id])
 }
 
 model GbpAccount {
   id               String   @id @default(uuid())
   ownerUserId      String
-  owner            User     @relation(fields: [ownerUserId], references: [id])
+  owner            User     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
   clientLabel      String?
   locationName     String
   googleAccountId  String
   googleLocationId String
-  accessTokenEnc   String
-  refreshTokenEnc  String
-  tokenExpiresAt   DateTime
-  connected        Boolean  @default(true)
-  connectedAt      DateTime @default(now())
+
+  // Null until the Google OAuth flow completes — an account row is created
+  // first and connected second.
+  accessTokenEnc   String?
+  refreshTokenEnc  String?
+  tokenExpiresAt   DateTime?
+
+  address          String?
+  phone            String?
+  website          String?
+  placeId          String?
+  category         String?
+  description      String?
+  openingHours     Json?
+  healthScore      Int?
+  rating           Float?
+  reviewsCount     Int?
+
+  connected        Boolean  @default(false)
+  connectedAt      DateTime?
+  createdAt        DateTime @default(now())
+
   posts            GbpPost[]
   reviews          GbpReview[]
   photos           GbpPhoto[]
+  aiReplyConfig    AiReplyConfig?
+
+  @@index([ownerUserId])
 }
 
 model GbpPost {
-  id            String     @id @default(uuid())
-  gbpAccountId  String
-  gbpAccount    GbpAccount @relation(fields: [gbpAccountId], references: [id])
-  type          PostType
-  imageUrl      String
-  caption       String
-  ctaLabel      String?
-  ctaLink       String?
-  eventStart    DateTime?
-  eventEnd      DateTime?
-  status        PostStatus @default(DRAFT)
-  scheduledAt   DateTime?
-  publishedAt   DateTime?
-  createdAt     DateTime   @default(now())
+  id           String     @id @default(uuid())
+  gbpAccountId String
+  gbpAccount   GbpAccount @relation(fields: [gbpAccountId], references: [id], onDelete: Cascade)
+  type         PostType
+  imageUrl     String?
+  caption      String     @db.Text
+  ctaLabel     String?
+  ctaLink      String?
+  eventTitle   String?
+  eventStart   DateTime?
+  eventEnd     DateTime?
+  couponCode   String?
+  terms        String?    @db.Text
+  status       PostStatus @default(DRAFT)
+  scheduledAt  DateTime?
+  publishedAt  DateTime?
+  viewsCount   Int        @default(0)
+  clicksCount  Int        @default(0)
+
+  // The scheduler is a Postgres poll, not a queue — retries are counted on
+  // the row itself.
+  retryCount   Int        @default(0)
+  lastError    String?    @db.Text
+
+  createdAt    DateTime   @default(now())
+
+  @@index([gbpAccountId])
+  @@index([status, scheduledAt])
 }
 
 model GbpReview {
-  id             String     @id @default(uuid())
-  gbpAccountId   String
-  gbpAccount     GbpAccount @relation(fields: [gbpAccountId], references: [id])
-  reviewerName   String
-  reviewerPhoto  String?
-  rating         Int
-  text           String
-  createdAt      DateTime
-  replyText      String?
-  repliedAt      DateTime?
-  replySource    String?
+  id            String     @id @default(uuid())
+  gbpAccountId  String
+  gbpAccount    GbpAccount @relation(fields: [gbpAccountId], references: [id], onDelete: Cascade)
+  googleReviewId String?   @unique
+  reviewerName  String
+  reviewerPhoto String?
+  rating        Int
+  text          String     @db.Text
+  sentiment     String?
+  createdAt     DateTime
+  replyText     String?    @db.Text
+  repliedAt     DateTime?
+  replySource   String?
+
+  @@index([gbpAccountId])
 }
 
 model GbpPhoto {
-  id            String        @id @default(uuid())
-  gbpAccountId  String
-  gbpAccount    GbpAccount    @relation(fields: [gbpAccountId], references: [id])
-  url           String
-  category      PhotoCategory
-  caption       String?
-  uploadedAt    DateTime      @default(now())
+  id           String        @id @default(uuid())
+  gbpAccountId String
+  gbpAccount   GbpAccount    @relation(fields: [gbpAccountId], references: [id], onDelete: Cascade)
+  url          String
+  category     PhotoCategory
+  caption      String?
+  viewsCount   Int           @default(0)
+  dimensions   String?
+  uploadedAt   DateTime      @default(now())
+
+  @@index([gbpAccountId])
 }
 
 model AiReplyConfig {
-  id                  String  @id @default(uuid())
-  gbpAccountId        String  @unique
-  userId              String
-  user                User    @relation(fields: [userId], references: [id])
-  persona             String  @db.Text
-  autoReplyEnabled    Boolean @default(false)
-  autoReplyMinRating  Int     @default(4)
-  signature           String?
+  id                 String     @id @default(uuid())
+  gbpAccountId       String     @unique
+  gbpAccount         GbpAccount @relation(fields: [gbpAccountId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  persona            String     @db.Text
+  autoReplyEnabled   Boolean    @default(false)
+  autoReplyMinRating Int        @default(4)
+  signature          String?
+  llmProvider        String?    @default("anthropic")
+  modelName          String?
+  apiKeyMasked       String?
+}
+
+model AgencyTeamMember {
+  id                String   @id @default(uuid())
+  agencyId          String
+  agency            User     @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  name              String
+  email             String
+  role              String
+  assignedClientIds String[] @default([])
+  avatarUrl         String?
+  status            String   @default("pending")
+  invitedAt         DateTime @default(now())
+
+  @@index([agencyId])
 }
 
 model PricingPlan {
-  id              String  @id @default(uuid())
-  name            String
-  priceMonthly    Int
-  maxGbpAccounts  Int
-  isAgencyPlan    Boolean @default(false)
-  features        Json
+  id             String  @id @default(uuid())
+  name           String
+  priceMonthly   Int
+  maxGbpAccounts Int
+  isAgencyPlan   Boolean @default(false)
+  features       Json
+  version        Int     @default(1)
+  aiReplyQuota   Int?
+
+  users          User[]
+}
+
+model GlobalPlatformSettings {
+  id                   String   @id @default(uuid())
+  defaultLlmProvider   String   @default("anthropic")
+  defaultModel         String   @default("claude-opus-5")
+  platformName         String   @default("Partner.ai")
+  maintenanceMode      Boolean  @default(false)
+  globalAnnouncement   String?  @db.Text
+  systemPromptPreset   String?  @db.Text
+  apiRateLimitPerMin   Int      @default(120)
+  gbpSyncIntervalMinutes Int    @default(60)
+  updatedAt            DateTime @updatedAt
 }
 
 model AuditLog {
@@ -136,5 +223,9 @@ model AuditLog {
   action     String
   targetType String
   targetId   String
+  metadata   Json?
   createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([createdAt])
 }

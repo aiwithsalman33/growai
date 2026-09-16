@@ -1,16 +1,50 @@
 require('dotenv').config();
 
+/**
+ * Fails fast on missing required vars rather than surfacing them later as
+ * confusing runtime errors (a null JWT secret signs tokens nobody can verify).
+ */
+function required(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing required environment variable: ${name}. See .env.example.`
+    );
+  }
+  return value;
+}
+
+const nodeEnv = process.env.NODE_ENV || 'development';
+
 module.exports = {
-  databaseUrl: process.env.DATABASE_URL,
-  jwtAccessSecret: process.env.JWT_ACCESS_SECRET,
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
+  nodeEnv,
+  isProduction: nodeEnv === 'production',
+  port: Number(process.env.PORT) || 4000,
+
+  databaseUrl: required('DATABASE_URL'),
+
+  jwtAccessSecret: required('JWT_ACCESS_SECRET'),
+  jwtRefreshSecret: required('JWT_REFRESH_SECRET'),
+  accessTokenTtl: process.env.ACCESS_TOKEN_TTL || '15m',
+  refreshTokenTtl: process.env.REFRESH_TOKEN_TTL || '7d',
+
+  // 32-byte hex key used to encrypt Google OAuth tokens at rest.
   encryptionKey: process.env.ENCRYPTION_KEY,
+
   googleClientId: process.env.GOOGLE_CLIENT_ID,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  googleRedirectUri: process.env.GOOGLE_REDIRECT_URI,
-  stripeSecretKey: process.env.STRIPE_SECRET_KEY,
-  s3Bucket: process.env.S3_BUCKET,
-  s3AccessKey: process.env.S3_ACCESS_KEY,
-  s3SecretKey: process.env.S3_SECRET_KEY,
-  port: process.env.PORT || 4000,
+  googleRedirectUri:
+    process.env.GOOGLE_REDIRECT_URI ||
+    'http://localhost:4000/api/gbp/oauth/callback',
+
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+  anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-opus-5',
+
+  frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
+
+  uploadDir: process.env.UPLOAD_DIR || 'uploads',
+  maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES) || 10 * 1024 * 1024,
+
+  schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS) || 30000,
+  schedulerMaxRetries: Number(process.env.SCHEDULER_MAX_RETRIES) || 3,
 };
